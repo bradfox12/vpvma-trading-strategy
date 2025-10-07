@@ -1,0 +1,231 @@
+date,dropped,added,universe_size
+2006-01-03,[],"['MCD', 'CRM', 'AMZN', 'CAT', 'NVDA', 'NFLX', 'QCOM', 'NKE', 'ADBE', 'AMD', 'AAPL', 'GOOGL']",12
+2006-02-01,"['AMZN', 'NKE', 'NFLX']","['JPM', 'GS', 'MS']",12
+2006-03-01,"['MS', 'MCD', 'JPM', 'AAPL', 'GOOGL']","['LMT', 'FDX', 'RTX', 'COST', 'HON']",12
+2006-04-03,"['LMT', 'ADBE', 'AMD', 'RTX', 'HON']","['MS', 'JPM', 'PFE', 'NFLX', 'NKE']",12
+2006-05-01,"['CRM', 'PFE', 'NFLX', 'QCOM', 'NKE']","['LMT', 'BA', 'AAPL', 'RTX', 'HON']",12
+2006-06-01,"['LMT', 'MS', 'FDX', 'GS', 'AAPL', 'HON']",['KO'],7
+2006-07-03,"['JPM', 'BA', 'NVDA', 'RTX', 'COST']","['DIS', 'WMT', 'GOOGL']",5
+2006-08-01,"['DIS', 'WMT', 'GOOGL']","['LMT', 'MS', 'ORCL', 'JPM', 'RTX', 'COST']",8
+2006-09-01,"['LMT', 'JPM', 'CAT', 'RTX', 'COST']","['PFE', 'GS', 'MCD']",6
+2006-10-02,['GS'],"['AAPL', 'RTX', 'NVDA']",8
+2006-11-01,['PFE'],"['LMT', 'CRM', 'INTC', 'NKE', 'GOOGL']",12
+2006-12-01,"['NKE', 'RTX', 'ORCL', 'MCD']","['ADBE', 'AMZN', 'GS', 'BA']",12
+2007-01-03,"['INTC', 'GOOGL', 'BA', 'CRM']","['MSFT', 'NKE', 'MCD', 'HD']",12
+2007-02-01,"['ADBE', 'AMZN', 'KO', 'NVDA']","['INTC', 'GOOGL', 'COST', 'CRM']",12
+2007-03-01,"['AAPL', 'MSFT', 'GOOGL', 'MCD']","['JPM', 'AMZN', 'RTX', 'BA']",12
+2007-04-02,"['LMT', 'MS', 'HD', 'CRM', 'JPM', 'BA', 'INTC', 'GS', 'RTX', 'COST']","['AAPL', 'ORCL', 'QCOM', 'UNH', 'KO']",7
+2007-05-01,"['UNH', 'ORCL']","['RTX', 'MS', 'HON']",8
+2007-06-01,"['QCOM', 'RTX']","['HD', 'CRM', 'CAT', 'INTC', 'GOOGL', 'MA']",12
+2007-07-02,"['KO', 'HON']","['MCD', 'NVDA']",12
+2007-08-01,"['MS', 'MCD', 'HD', 'CRM']","['LMT', 'COST', 'KO', 'HON']",12
+2007-09-04,"['LMT', 'CAT', 'NKE', 'GOOGL', 'HON']","['PEP', 'UPS', 'PG', 'RTX']",11
+2007-10-01,"['PEP', 'UPS', 'PG', 'COST']","['LMT', 'MCD', 'ORCL', 'NKE', 'GOOGL']",12
+2007-11-01,"['RTX', 'MCD', 'ORCL']","['COST', 'CAT', 'CRM']",12
+2007-12-03,"['INTC', 'AMZN', 'CAT', 'NVDA']","['MSFT', 'JNJ', 'MCD', 'NFLX']",12
+2008-01-02,"['LMT', 'JNJ', 'NKE']","['INTC', 'AMZN', 'HON']",12
+2008-02-01,"['AAPL', 'MCD', 'CRM', 'AMZN', 'INTC', 'KO', 'MSFT', 'GOOGL', 'COST', 'HON']",['WMT'],3
+2008-03-03,[],"['NKE', 'CRM']",5
+2008-04-01,[],"['MCD', 'KO']",7
+2008-05-01,['KO'],"['QCOM', 'COST', 'CAT']",9
+2008-06-02,['NKE'],"['AAPL', 'ORCL', 'HON']",11
+2008-07-01,"['MCD', 'ORCL', 'CAT', 'NFLX', 'AAPL', 'COST', 'HON']",[],4
+2008-08-01,"['WMT', 'CRM', 'MA']",['MCD'],2
+2008-09-02,[],"['LMT', 'ORCL', 'WMT', 'ADBE', 'AAPL', 'MA']",8
+2008-10-01,"['ORCL', 'QCOM', 'ADBE', 'AAPL', 'MA']","['PEP', 'JNJ', 'PG']",6
+2008-11-03,"['PEP', 'LMT', 'JNJ', 'MCD', 'WMT', 'PG']",[],0
+2009-03-02,[],['NFLX'],1
+2009-05-01,[],"['MS', 'CRM', 'V', 'AMZN', 'NVDA', 'GS', 'MA']",8
+2009-06-01,['NVDA'],"['JPM', 'QCOM', 'AMD', 'AAPL', 'GOOGL']",12
+2009-07-01,"['CRM', 'V', 'JPM', 'NFLX', 'MA']","['DIS', 'NVDA', 'INTC', 'ADBE', 'KO']",12
+2009-08-03,"['MS', 'DIS', 'QCOM', 'AMD', 'KO']","['CRM', 'JPM', 'FDX', 'BAC', 'MSFT']",12
+2009-09-01,"['AMZN', 'GOOGL', 'MSFT', 'NVDA']","['AMD', 'DIS', 'BA', 'CAT']",12
+2009-10-01,"['INTC', 'DIS', 'ADBE']","['NKE', 'GOOGL', 'RTX']",12
+2009-11-02,"['JPM', 'FDX', 'BAC', 'NKE', 'RTX']","['AMZN', 'ADBE', 'MSFT', 'KO', 'MA']",12
+2009-12-01,"['ADBE', 'MSFT', 'GS', 'BA']","['UNH', 'NFLX', 'MS', 'FDX']",12
+2010-01-04,"['MS', 'CAT', 'NFLX', 'UNH', 'AAPL', 'KO']","['V', 'NVDA', 'INTC', 'PFE', 'NKE', 'RTX']",12
+2010-02-01,"['AMZN', 'FDX', 'NVDA', 'NKE', 'GOOGL']","['HD', 'BA', 'BAC', 'AAPL', 'HON']",12
+2010-03-01,"['V', 'INTC', 'PFE', 'BAC', 'AAPL', 'RTX', 'HON', 'MA']","['AMZN', 'UNH', 'NFLX']",7
+2010-04-01,['HD'],"['V', 'CAT', 'BAC', 'AAPL', 'KO', 'MA']",12
+2010-05-03,"['V', 'UNH', 'KO', 'MA']","['DIS', 'UPS', 'FDX', 'HD']",12
+2010-06-01,"['DIS', 'AMZN', 'BA', 'CAT', 'FDX', 'BAC', 'UPS']",['MCD'],6
+2010-07-01,"['AMD', 'MCD', 'HD']",[],3
+2010-08-02,[],"['UPS', 'BA', 'MCD', 'CAT']",7
+2010-09-01,"['AAPL', 'BA', 'MCD']","['NKE', 'KO']",6
+2010-10-01,['UPS'],"['AMZN', 'QCOM', 'ORCL', 'AAPL']",9
+2010-11-01,['CRM'],"['PFE', 'UNH', 'GOOGL', 'AVGO']",12
+2010-12-01,"['PFE', 'UNH', 'ORCL']","['GS', 'MA', 'CRM']",12
+2011-01-03,"['GS', 'GOOGL', 'MA']","['COST', 'FDX', 'NVDA']",12
+2011-02-01,"['NKE', 'KO', 'FDX', 'CRM']","['AMD', 'UNH', 'GOOGL', 'HD']",12
+2011-03-01,"['AMZN', 'HD']","['JPM', 'NKE']",12
+2011-04-01,"['JPM', 'QCOM', 'NKE', 'AAPL', 'GOOGL', 'COST']","['DIS', 'PFE', 'ADBE', 'KO', 'HON', 'MA']",12
+2011-05-02,"['PFE', 'DIS', 'AMD', 'ADBE']","['JPM', 'AMZN', 'COST', 'CRM']",12
+2011-06-01,"['JPM', 'CAT', 'KO', 'UNH', 'COST', 'HON']","['ORCL', 'PFE', 'INTC', 'QCOM', 'AMD', 'RTX']",12
+2011-07-01,"['ORCL', 'AMZN', 'NVDA', 'PFE', 'INTC', 'QCOM', 'AMD', 'RTX']","['TSLA', 'UNH']",6
+2011-08-01,"['TSLA', 'UNH']","['AMZN', 'CAT', 'INTC', 'QCOM', 'NKE', 'AAPL', 'RTX', 'KO']",12
+2011-09-01,"['CRM', 'CAT', 'INTC', 'NFLX', 'QCOM', 'NKE', 'AVGO', 'RTX', 'KO']",['MCD'],4
+2011-10-03,[],"['JNJ', 'V', 'NKE', 'AVGO', 'COST', 'UNH', 'KO']",11
+2011-11-01,"['UNH', 'JNJ', 'MCD', 'KO']","['INTC', 'MSFT', 'WMT']",10
+2011-12-01,"['AAPL', 'AMZN', 'AVGO', 'MSFT', 'COST']","['TSLA', 'GOOGL', 'HD']",8
+2012-01-03,"['TSLA', 'HD']","['PFE', 'AAPL', 'KO']",9
+2012-02-01,"['PFE', 'GOOGL', 'MA']","['UNH', 'CAT', 'HD']",9
+2012-03-01,"['UNH', 'WMT', 'KO']","['TSLA', 'JPM', 'DIS', 'ADBE', 'HON', 'MA']",12
+2012-04-02,"['DIS', 'CAT', 'INTC', 'ADBE', 'HON', 'MA']","['MS', 'CRM', 'C', 'BAC', 'GS', 'AMD']",12
+2012-05-01,"['TSLA', 'C', 'GS', 'MS']","['QCOM', 'WMT', 'KO', 'MA']",12
+2012-06-01,"['CRM', 'V', 'JPM', 'QCOM', 'NKE', 'AMD', 'MA']","['PFE', 'DIS', 'AMZN']",8
+2012-07-02,"['PFE', 'KO']","['V', 'UNH', 'AVGO', 'CRM']",10
+2012-08-01,"['HD', 'CRM', 'DIS', 'BAC', 'UNH']","['PFE', 'KO', 'MA']",8
+2012-09-04,"['PFE', 'KO', 'MA']","['BAC', 'GOOGL', 'CRM']",8
+2012-10-01,"['BAC', 'AVGO', 'CRM']",['MA'],6
+2012-11-01,"['AMZN', 'AAPL']","['C', 'BAC', 'GS', 'MS']",8
+2012-12-03,"['WMT', 'GOOGL']","['JPM', 'NFLX', 'HD']",9
+2013-01-02,"['V', 'HD']","['GOOGL', 'CRM', 'AMZN', 'QCOM', 'RTX']",12
+2013-02-01,"['QCOM', 'RTX']","['TSLA', 'NKE']",12
+2013-03-01,['TSLA'],['RTX'],12
+2013-04-01,"['MS', 'JPM', 'AMZN', 'RTX', 'MA']","['TSLA', 'V', 'BA', 'AVGO', 'ADBE']",12
+2013-05-01,"['GS', 'GOOGL', 'AVGO', 'CRM']","['PFE', 'DIS', 'RTX', 'MA']",12
+2013-06-03,"['V', 'DIS', 'PFE', 'ADBE', 'RTX', 'MA']","['MS', 'JPM', 'AMZN', 'GS', 'AMD', 'GOOGL']",12
+2013-07-01,"['JPM', 'GS', 'NKE']","['HON', 'AVGO', 'HD']",12
+2013-08-01,"['HON', 'C', 'MS', 'HD']","['LMT', 'NOW', 'FDX', 'MA']",12
+2013-09-03,"['AMZN', 'FDX', 'BAC', 'AVGO', 'AMD', 'GOOGL']","['MS', 'META', 'NVDA', 'NKE', 'UNH', 'RTX']",12
+2013-10-01,"['UNH', 'NKE', 'BA', 'RTX']","['AMD', 'AMZN', 'AAPL', 'AVGO']",12
+2013-11-01,"['AMD', 'MS', 'NVDA']","['GOOGL', 'FDX', 'CRM']",12
+2013-12-02,['TSLA'],['NKE'],12
+2014-01-02,"['LMT', 'NOW', 'CRM']","['TSLA', 'ABBV', 'ADBE']",12
+2014-02-03,"['FDX', 'ABBV', 'NKE', 'ADBE', 'AAPL']","['LMT', 'MS', 'CRM', 'NOW', 'NVDA']",12
+2014-03-03,"['AMZN', 'MS', 'MA']","['V', 'RTX', 'ADBE']",12
+2014-04-01,"['TSLA', 'CRM', 'V', 'NOW', 'NVDA', 'NFLX', 'RTX']","['MS', 'DIS', 'ABBV', 'BAC', 'NKE', 'AAPL', 'MSFT']",12
+2014-05-01,"['LMT', 'MS', 'DIS', 'META', 'ABBV', 'BAC', 'NKE', 'ADBE', 'MSFT', 'GOOGL']","['TSLA', 'CAT', 'NVDA', 'WMT', 'AMD', 'RTX']",8
+2014-06-02,"['CAT', 'NVDA', 'WMT', 'AMD', 'RTX']","['V', 'META', 'NFLX']",6
+2014-07-01,['V'],"['ABBV', 'AMD', 'GOOGL', 'NVDA']",9
+2014-08-01,"['AMD', 'META', 'GOOGL', 'NVDA']","['INTC', 'NKE']",7
+2014-09-02,['ABBV'],['NVDA'],7
+2014-10-01,[],"['ABBV', 'META', 'WMT', 'GOOGL']",11
+2014-11-03,"['TSLA', 'NVDA', 'NFLX', 'WMT', 'GOOGL']","['LMT', 'HD', 'NOW', 'FDX', 'UNH']",11
+2014-12-01,"['LMT', 'HD', 'META', 'FDX', 'UNH']","['TSLA', 'NVDA', 'WMT', 'V']",10
+2015-01-02,"['TSLA', 'INTC']","['PFE', 'C', 'MS', 'HD']",12
+2015-02-02,"['MS', 'V', 'NVDA', 'ABBV', 'C', 'NKE', 'AAPL']","['UNH', 'LMT', 'RTX', 'ORCL']",9
+2015-03-02,"['LMT', 'WMT', 'ORCL']","['V', 'AMZN', 'NVDA', 'AAPL', 'COST']",11
+2015-04-01,"['PFE', 'RTX', 'COST']",['NKE'],9
+2015-05-01,"['V', 'HD', 'NVDA']","['ABBV', 'NFLX', 'CRM']",9
+2015-06-01,"['ABBV', 'UNH', 'NOW']",[],6
+2015-07-01,"['AAPL', 'CRM']","['TSLA', 'NOW', 'ABBV']",7
+2015-08-03,"['ABBV', 'AVGO']","['JPM', 'META', 'GOOGL']",8
+2015-09-01,"['TSLA', 'JPM', 'NOW']","['V', 'HD', 'ADBE']",8
+2015-10-01,"['HD', 'V', 'META', 'ADBE', 'GOOGL']","['TSLA', 'AVGO', 'NVDA']",6
+2015-11-02,"['TSLA', 'AVGO']","['META', 'UNH', 'GOOGL']",7
+2015-12-01,['UNH'],[],6
+2016-01-04,"['META', 'NKE']","['AMD', 'MSFT', 'AVGO']",7
+2016-02-01,"['AMZN', 'NFLX', 'AVGO', 'AMD', 'MSFT', 'GOOGL']",['MCD'],2
+2016-03-01,['MCD'],['META'],2
+2016-04-01,[],"['MCD', 'WMT', 'AVGO', 'AMD', 'MSFT', 'GOOGL']",8
+2016-05-02,"['META', 'MSFT', 'GOOGL', 'MCD']","['AMZN', 'RTX', 'CAT']",7
+2016-06-01,"['WMT', 'RTX', 'AVGO', 'CAT']",['ABBV'],4
+2016-07-01,['ABBV'],"['WMT', 'AVGO', 'SHOP']",6
+2016-08-01,[],"['TSLA', 'QCOM', 'CAT']",9
+2016-09-01,"['TSLA', 'QCOM', 'WMT', 'CAT']","['AAPL', 'GOOGL']",7
+2016-10-03,['AVGO'],"['QCOM', 'C', 'NOW', 'MS']",10
+2016-11-01,['C'],"['NFLX', 'AVGO']",11
+2016-12-01,"['SHOP', 'AMZN', 'NFLX', 'AAPL', 'GOOGL']","['JPM', 'CAT', 'C', 'GS', 'BAC', 'SQ']",12
+2017-01-03,"['JPM', 'NOW', 'QCOM']","['AAPL', 'GOOGL', 'SHOP']",12
+2017-02-01,"['C', 'CAT']","['AMZN', 'NFLX']",12
+2017-04-03,"['GS', 'MS', 'SQ']","['TSLA', 'C', 'JPM']",12
+2017-05-01,"['JPM', 'C', 'NFLX', 'BAC']","['WMT', 'CAT', 'SQ']",11
+2017-06-01,['CAT'],"['NFLX', 'NOW']",12
+2017-07-03,"['NFLX', 'WMT', 'AAPL']","['ADBE', 'ORCL', 'CRM']",12
+2017-08-01,"['NOW', 'GOOGL', 'ORCL', 'CRM']","['META', 'NFLX', 'BA']",11
+2017-09-01,"['META', 'AMZN', 'BA', 'NFLX', 'ADBE', 'AMD']","['AAPL', 'NOW', 'WMT']",8
+2017-10-02,['AVGO'],"['ABBV', 'GOOGL', 'BA']",10
+2017-11-01,"['TSLA', 'AAPL', 'SHOP']","['ADBE', 'AMZN', 'AVGO']",10
+2017-12-01,"['NOW', 'WMT', 'BA']","['JPM', 'INTC', 'BAC', 'QCOM', 'AAPL']",12
+2018-01-02,"['JPM', 'BAC', 'QCOM', 'AVGO', 'ADBE']","['BA', 'CAT', 'WMT', 'MSFT', 'MA']",12
+2018-02-01,"['MSFT', 'GOOGL', 'MA']","['ADBE', 'NFLX', 'SHOP']",12
+2018-03-01,"['AAPL', 'WMT', 'CAT']","['BAC', 'NOW', 'MA']",12
+2018-04-02,"['ABBV', 'BAC', 'BA']","['AAPL', 'MS', 'CRM']",12
+2018-05-01,"['MS', 'SHOP', 'CRM', 'NVDA', 'AAPL', 'MA']","['MSFT', 'BA']",8
+2018-06-01,['MSFT'],"['SHOP', 'NVDA', 'ABBV', 'AAPL', 'GOOGL']",12
+2018-07-02,"['ABBV', 'INTC', 'BA', 'NVDA']","['AMD', 'NKE', 'MA', 'CRM']",12
+2018-08-01,"['ADBE', 'NKE', 'MA', 'CRM']",[],8
+2018-09-04,"['NFLX', 'NOW', 'SHOP']","['NKE', 'NVDA']",7
+2018-10-01,"['GOOGL', 'NVDA']","['CRM', 'SHOP', 'PFE', 'NFLX', 'QCOM', 'ADBE', 'MSFT']",12
+2018-11-01,"['CRM', 'SHOP', 'AMZN', 'NFLX', 'QCOM', 'NKE', 'ADBE', 'AAPL', 'MSFT']","['WMT', 'BA']",5
+2018-12-03,"['BA', 'SQ']",['PG'],4
+2019-01-02,"['AMD', 'WMT']","['KO', 'MCD', 'AVGO']",5
+2019-02-01,"['PFE', 'PG', 'MCD', 'KO']","['AMD', 'WMT']",3
+2019-03-01,['AMD'],"['BA', 'SHOP']",4
+2019-04-01,['BA'],"['NOW', 'SNAP']",5
+2019-05-01,[],"['META', 'AMZN', 'NFLX', 'QCOM', 'AMD', 'GOOGL']",11
+2019-06-03,"['NFLX', 'GOOGL', 'AVGO']",['RTX'],9
+2019-07-01,"['META', 'AMZN', 'QCOM', 'RTX']","['LMT', 'V', 'DIS', 'C', 'ADBE', 'MSFT', 'MA']",12
+2019-08-01,"['V', 'DIS', 'C', 'ADBE', 'MA']","['AMZN', 'QCOM', 'AVGO', 'AAPL', 'RTX']",12
+2019-09-03,"['AMZN', 'NOW', 'WMT', 'AVGO', 'MSFT', 'RTX']","['GOOGL', 'COST', 'HD']",9
+2019-10-01,"['AMD', 'COST', 'HD']",['WMT'],7
+2019-11-01,"['LMT', 'QCOM', 'SHOP']","['AMD', 'RTX', 'NVDA']",7
+2019-12-02,['RTX'],"['TSLA', 'ABBV', 'INTC', 'QCOM', 'AVGO']",11
+2020-01-02,"['ABBV', 'QCOM', 'INTC']",['SHOP'],9
+2020-02-03,"['WMT', 'AVGO', 'SNAP']","['MS', 'CRM', 'NOW', 'INTC', 'NFLX', 'RTX']",12
+2020-03-02,"['MS', 'SHOP', 'NOW', 'NFLX', 'RTX']","['AMZN', 'ABBV', 'ADBE', 'SQ', 'MA']",12
+2020-04-01,"['CRM', 'AMZN', 'ABBV', 'INTC', 'ADBE', 'AAPL', 'GOOGL', 'SQ', 'MA']","['NFLX', 'SHOP']",5
+2020-05-01,[],"['JNJ', 'AMZN', 'ZM', 'INTC', 'ADBE', 'AAPL', 'MSFT']",12
+2020-06-01,"['MSFT', 'JNJ']","['ABBV', 'NOW']",12
+2020-07-01,"['ABBV', 'AMD', 'AAPL', 'INTC']","['MSFT', 'AVGO', 'SNAP', 'SQ']",12
+2020-08-03,"['MSFT', 'AVGO', 'SNAP']","['AMD', 'AAPL', 'CRM']",12
+2020-09-01,"['ADBE', 'NFLX', 'NOW']","['META', 'UPS', 'FDX']",12
+2020-10-01,"['SHOP', 'AMZN', 'ZM', 'NVDA', 'AMD', 'UPS']","['HD', 'DDOG', 'NKE', 'AVGO', 'ADBE', 'UBER']",12
+2020-11-02,"['HD', 'CRM', 'META', 'NKE', 'AVGO', 'ADBE', 'AAPL', 'UBER']","['SHOP', 'ZM', 'NVDA', 'SNAP', 'CAT', 'QCOM', 'AMD', 'UPS']",12
+2020-12-01,"['DDOG', 'UPS', 'ZM', 'SHOP']","['UBER', 'NOW', 'MS', 'AVGO']",12
+2021-01-04,"['NOW', 'MS', 'CAT', 'NVDA']","['C', 'DIS', 'BAC', 'LYFT']",12
+2021-02-01,"['AMD', 'C', 'BAC', 'FDX']","['JPM', 'GS', 'MS', 'CAT']",12
+2021-03-01,"['JPM', 'QCOM']","['C', 'ZM']",12
+2021-04-01,"['TSLA', 'ZM', 'SNAP', 'AVGO', 'UBER', 'SQ']","['GOOGL', 'JPM', 'BA', 'INTC', 'BAC', 'RTX']",12
+2021-05-03,"['DIS', 'LYFT', 'MS', 'CAT']","['TSLA', 'UBER', 'AVGO', 'SNAP']",12
+2021-06-01,"['TSLA', 'BA', 'INTC', 'AVGO', 'UBER', 'RTX']","['LYFT', 'MS', 'ORCL', 'CAT', 'NVDA', 'UPS']",12
+2021-07-01,"['ORCL', 'JPM', 'CAT', 'C', 'UPS']","['SHOP', 'META', 'AMZN', 'AVGO', 'SQ']",12
+2021-08-02,"['AMZN', 'BAC', 'LYFT', 'GS']","['ADBE', 'AMD', 'DDOG', 'ORCL']",12
+2021-09-01,"['META', 'MS', 'ORCL', 'SQ']","['PFE', 'AAPL', 'GS', 'CRM']",12
+2021-10-01,"['CRM', 'SHOP', 'PFE', 'GS', 'ADBE', 'AAPL']","['SNOW', 'COST', 'MS', 'TSLA']",10
+2021-11-01,"['GOOGL', 'MS', 'SNAP']","['CRM', 'NOW', 'NFLX', 'GE', 'MSFT']",12
+2021-12-01,"['CRM', 'AVGO', 'GE', 'MSFT', 'COST']","['SHOP', 'PFE', 'QCOM', 'ADBE', 'AAPL']",12
+2022-01-03,"['ADBE', 'NFLX', 'NOW', 'SHOP']","['COST', 'GOOGL', 'AVGO', 'HD']",12
+2022-02-01,"['SNOW', 'HD', 'NVDA', 'PFE', 'QCOM', 'AVGO', 'AMD', 'AAPL', 'GOOGL', 'COST']","['UPS', 'BAC', 'RTX', 'MS']",6
+2022-03-01,"['TSLA', 'RTX', 'MS']","['ABBV', 'MA']",5
+2022-04-01,"['DDOG', 'BAC', 'MA']","['TSLA', 'LMT', 'CAT', 'NVDA', 'PFE', 'AVGO', 'UNH', 'RTX', 'COST']",11
+2022-05-02,"['TSLA', 'NVDA', 'AVGO', 'UNH', 'UPS']",['WMT'],7
+2022-06-01,"['LMT', 'CAT', 'PFE', 'WMT', 'RTX', 'COST']",['KO'],2
+2022-07-01,"['ABBV', 'KO']",[],0
+2022-11-01,[],"['RBLX', 'NFLX', 'LMT']",3
+2022-12-01,"['RBLX', 'LMT']","['UNH', 'WMT', 'BA']",4
+2023-01-03,['UNH'],"['GE', 'HON', 'CAT']",6
+2023-02-01,"['WMT', 'HON']","['SHOP', 'JPM', 'NVDA', 'AVGO', 'UBER']",9
+2023-03-01,"['BA', 'CAT']","['WMT', 'SQ']",9
+2023-04-03,"['JPM', 'NFLX', 'WMT', 'UBER', 'SQ']","['COIN', 'CRM', 'RBLX', 'META', 'BA', 'FDX', 'ABNB', 'AMD']",12
+2023-05-01,"['RBLX', 'COIN', 'ABNB', 'CRM']","['NFLX', 'NOW', 'NKE', 'MSFT']",12
+2023-06-01,"['NOW', 'BA', 'FDX', 'NKE', 'MSFT']","['ORCL', 'CRM', 'AMZN', 'PLTR', 'UBER']",12
+2023-07-03,"['GE', 'AMZN', 'ORCL']","['TSLA', 'COIN', 'ABNB']",12
+2023-08-01,"['AMD', 'NFLX', 'CRM']","['INTC', 'DDOG', 'ADBE']",12
+2023-09-01,"['TSLA', 'COIN', 'AVGO', 'ABNB', 'UBER']","['AMZN', 'FDX', 'WMT', 'GE', 'GOOGL']",12
+2023-10-02,"['GE', 'DDOG', 'FDX']","['TSLA', 'UBER', 'ABNB']",12
+2023-11-01,"['TSLA', 'SHOP', 'INTC', 'WMT', 'ABNB', 'UBER', 'GOOGL']","['NFLX', 'NOW', 'COIN', 'AVGO']",9
+2023-12-01,"['META', 'AMZN', 'NFLX']","['LYFT', 'SHOP', 'INTC', 'DDOG', 'AMD', 'UBER']",12
+2024-01-02,"['ADBE', 'DDOG', 'UBER', 'PLTR']","['SNOW', 'RBLX', 'SNAP', 'ABNB']",12
+2024-02-01,"['RBLX', 'LYFT', 'COIN', 'ABNB']","['NFLX', 'UBER', 'DDOG', 'CRM']",12
+2024-03-01,"['SNOW', 'CRM', 'NOW', 'SNAP', 'INTC', 'NFLX']","['COIN', 'LYFT', 'META', 'AMZN', 'PLTR', 'ABNB']",12
+2024-04-01,"['SHOP', 'AMZN', 'DDOG', 'PLTR', 'ABNB']","['DIS', 'C', 'QCOM', 'GE', 'SQ']",12
+2024-05-01,"['META', 'UBER', 'DIS', 'LYFT']","['AMZN', 'SNAP', 'DDOG', 'CAT']",12
+2024-06-03,"['AMZN', 'SNAP', 'CAT', 'DDOG', 'AMD', 'SQ']","['JPM', 'NFLX', 'BAC', 'GS', 'GOOGL', 'COST']",12
+2024-07-01,"['JPM', 'C', 'BAC', 'GS']","['AMD', 'META', 'AMZN', 'PLTR']",12
+2024-08-01,"['META', 'AMZN', 'NFLX', 'QCOM', 'AMD', 'GOOGL', 'COST']","['TSLA', 'LMT', 'ORCL', 'NOW', 'FDX', 'GS', 'RTX']",12
+2024-09-03,"['TSLA', 'LMT', 'COIN', 'ORCL', 'NOW', 'FDX', 'AVGO', 'RTX']","['RBLX', 'META', 'AAPL']",7
+2024-10-01,"['META', 'GS']","['TSLA', 'ORCL', 'AVGO', 'UNH', 'COST']",10
+2024-11-01,"['GE', 'UNH', 'COST', 'AAPL']","['MS', 'SHOP', 'META', 'NOW', 'NFLX', 'UBER']",12
+2024-12-02,"['MS', 'META', 'NFLX', 'AVGO', 'UBER']","['COIN', 'CRM', 'ZM', 'DDOG', 'SQ']",12
+2025-01-02,"['DDOG', 'COIN', 'ORCL', 'NVDA']","['META', 'NFLX', 'MS', 'AVGO']",12
+2025-02-03,"['MS', 'CRM', 'NOW', 'ZM', 'SQ']","['SNOW', 'JPM', 'AMZN', 'C', 'GS']",12
+2025-03-03,"['TSLA', 'JPM', 'AMZN', 'GS', 'AVGO']","['MS', 'ORCL', 'BA', 'ZM', 'ABNB']",12
+2025-04-01,"['MS', 'ORCL', 'SHOP', 'META', 'BA', 'ZM', 'C', 'ABNB']",['SQ'],5
+2025-05-01,[],"['WMT', 'MCD', 'KO']",8
+2025-06-02,"['SNOW', 'WMT', 'MCD', 'KO']","['GE', 'UBER', 'BA', 'AVGO']",8
+2025-07-01,"['BA', 'SQ']","['SNOW', 'LYFT', 'COIN', 'ORCL', 'SHOP', 'RTX']",12
+2025-08-01,"['SNOW', 'NFLX', 'LYFT', 'RTX']","['AMD', 'BA', 'SQ', 'NVDA']",12
+2025-09-02,"['GE', 'COIN', 'SQ']","['INTC', 'C', 'LYFT']",12
+2025-10-01,"['AMD', 'C', 'BA', 'NVDA']","['SNOW', 'DDOG', 'GOOGL', 'TSLA']",12
