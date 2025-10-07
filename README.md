@@ -46,6 +46,7 @@ vpvma_indicator/
 ├── secure_config.py     # Credential loader (uses .env)
 ├── main.py             # Main orchestration
 └── requirements.txt    # Python dependencies
+
 ## 🚀 Quick Start
 
 ### 1. Installation
@@ -117,6 +118,136 @@ Avoid:
 Low-volatility defensive stocks (consumer staples)
 Sideways/choppy markets
 Structurally broken stocks in downtrends
+
+## 📅 Trading Workflow
+
+### Three-Tier Operational System
+
+This strategy uses a three-tier approach balancing responsiveness with cost efficiency - the industry standard for equity momentum strategies.
+
+#### 🔄 MONTHLY: Universe Rebalancing
+**When:** First trading day of each month  
+**Duration:** ~30 minutes  
+**Action:**
+```bash
+# Update trend analysis
+python scripts/select_trending_stocks.py
+
+# Review changes and rebalance portfolio
+# - Exit stocks that dropped out of top rankings
+# - Add new stocks that entered strong trends
+# - Typical turnover: 2-5 position changes per month
+Purpose:
+
+Updates which stocks to trade based on current trend strength
+Removes weakening positions (e.g., META dropping from top performer to #41)
+Adds emerging leaders (new stocks entering strong uptrends)
+Low turnover = low transaction costs (~2.5% annual drag)
+
+📊 DAILY: Signal Execution
+When: Every trading day
+Duration: ~5 minutes
+Action:
+bash# Update market data
+python scripts/update_daily_data.py
+
+# Check VPVMA signals on current holdings only
+python scripts/check_signals.py --portfolio-only
+Purpose:
+
+Execute VPVMA buy/sell signals within your current universe
+Enter positions on crossover-up signals
+Exit to cash on crossover-down signals
+No universe churn - only signal-based trading
+
+🔍 QUARTERLY: Deep Analysis
+When: End of each quarter
+Duration: ~2 hours
+Action:
+bash# Performance review
+python scripts/batch_backtest.py --recent-quarter
+
+# Strategy validation
+# - Compare actual vs expected performance
+# - Review Sharpe ratio and drawdowns
+# - Validate edge still exists
+# - Compare to benchmarks (SPY, QQQ)
+Purpose:
+
+Comprehensive performance analysis
+Strategy health check
+Parameter validation (no optimization, just verification)
+Document lessons learned
+
+Why This Frequency?
+Monthly Universe Updates:
+
+✅ MA200 and MA50 are slow-moving (change ~0.1-0.5% per month)
+✅ Trends don't flip overnight - monthly captures real changes
+✅ Filters noise, catches genuine trend breaks
+✅ Low turnover = acceptable transaction costs
+✅ Industry standard (AQR, momentum ETFs)
+
+Daily Signal Execution:
+
+✅ VPVMA signals can trigger intraday
+✅ Captures entry/exit timing within universe
+✅ No universe churn - just existing positions
+✅ Maximizes strategy edge
+
+Why NOT Daily Universe Updates:
+
+❌ Excessive whipsaws (in/out/in/out)
+❌ Transaction costs destroy returns (~10% annual drag)
+❌ MAs don't change meaningfully day-to-day
+❌ Noise vs signal problem
+
+Example Monthly Workflow
+October 1st, 2025:
+1. Run trend selector → Get current top 20 stocks
+2. Compare to September's list:
+   - Dropped out: META (trend broke), GOOGL (weak)
+   - New entries: INTC (strong rally), COIN (momentum)
+3. Execute changes:
+   - Exit META and GOOGL positions
+   - Add INTC and COIN to watchlist
+   - Wait for VPVMA buy signals before entering
+4. Monitor daily VPVMA signals on remaining 18 holdings
+
+October 2-31:
+- Daily: Check VPVMA signals, execute trades
+- No universe changes until November 1st
+Academic Backing
+This approach is based on:
+
+Jegadeesh & Titman (1993): Momentum profits optimal with 6-12 month lookback, 3-6 month holding
+Fama & French: Moving average periods (50, 200 day) are industry standards
+Managed Futures CTAs: Monthly rebalancing balances costs vs responsiveness
+AQR Momentum Funds: $4B+ AUM using monthly rebalancing
+
+
+
+---
+
+## **Now Update the Quick Start Section**
+
+Find the "Quick Start" section and update step 5 to reference the workflow:
+```markdown
+### 5. Run Backtests and Analysis
+```bash
+# Single symbol backtest
+python run_vpvma.py
+
+# Batch backtest all symbols
+python scripts/batch_backtest.py
+
+# Select current trending stocks for trading
+python scripts/select_trending_stocks.py
+
+# Visualize signals
+python scripts/visualize_vpvma.py
+Next Steps: See Trading Workflow for operational procedures.
+
 
 📊 Example Results
 Top Performers (2020-2025)

@@ -53,3 +53,10 @@ Thumbs.db
 
 # pytest cache
 .pytest_cache/
+
+# Analysis output files (timestamped CSVs)
+stock_trend_analysis_*.csv
+vpvma_*_trending_*.csv
+vpvma_high_quality_*.csv
+*_backtest_*_trades.csv
+vpvma_*_comprehensive.csv
