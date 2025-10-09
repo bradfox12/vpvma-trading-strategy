@@ -1,0 +1,19 @@
+{
+  "baseline": {
+    "min_score": 75,
+    "top_n": 12,
+    "return": 843.286580661842,
+    "cagr": 11.37593183200407,
+    "max_dd": -25.693782495604932,
+    "rank": 8,
+    "percentile": 65.0
+  },
+  "best_return": {
+    "min_score": 85,
+    "top_n": 20,
+    "return": 1159.6359869414,
+    "improvement_vs_baseline": 37.51386699777382
+  },
+  "stability": {
+    "coefficient_of_variation": 45.578247345620056,
+    "is_stable": 
