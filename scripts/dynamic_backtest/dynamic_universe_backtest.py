@@ -61,7 +61,7 @@ def run_dynamic_backtest(db, start_date='2020-01-01', end_date='2025-10-31',
         all_symbols.update(data['symbols'])
     
     vpvma_data = {}
-    for idx, symbol in enumerate(all_symbols, 1):
+    for idx, symbol in enumerate(sorted(all_symbols), 1):  # Sort for determinism
         print(f"\r[{idx}/{len(all_symbols)}] Calculating {symbol:6}...", end='', flush=True)
         try:
             df = db.get_ohlcv_data(symbol)
@@ -94,9 +94,20 @@ def run_dynamic_backtest(db, start_date='2020-01-01', end_date='2025-10-31',
     
     portfolio = PortfolioManager(initial_capital=initial_capital)
     
-    # Get all trading dates
-    sample_df = next(iter(vpvma_data.values()))
-    all_dates = sorted(sample_df['timestamp'].unique())
+    # FIXED: Get ALL trading dates from ALL stocks (not just one random sample!)
+    print("\n🔍 Collecting all available trading dates...")
+    all_dates_set = set()
+    for symbol, df in vpvma_data.items():
+        all_dates_set.update(df['timestamp'].unique())
+    
+    all_dates = sorted(list(all_dates_set))
+    
+    if len(all_dates) == 0:
+        print("❌ ERROR: No trading dates found!")
+        return None
+    
+    print(f"✓ Found {len(all_dates)} unique trading days")
+    print(f"  Period: {all_dates[0].strftime('%Y-%m-%d')} to {all_dates[-1].strftime('%Y-%m-%d')}")
     
     current_month = None
     rebalance_dates = []
@@ -126,11 +137,13 @@ def run_dynamic_backtest(db, start_date='2020-01-01', end_date='2025-10-31',
                 dropped, added = portfolio.monthly_rebalance(new_universe, date_str, current_prices)
                 rebalance_dates.append(date_str)
                 
-                print(f"\n  {date_str}: Universe = {len(new_universe)} stocks")
-                if dropped:
-                    print(f"    Dropped: {', '.join(dropped)}")
-                if added:
-                    print(f"    Added: {', '.join(added)}")
+                if len(new_universe) > 0:
+                    print(f"    Rebalance: Dropped {len(dropped)}, Added {len(added)}")
+                    print(f"\n  {date_str}: Universe = {len(new_universe)} stocks")
+                    if dropped:
+                        print(f"    Dropped: {', '.join(dropped)}")
+                    if added:
+                        print(f"    Added: {', '.join(added)}")
         
         # Check VPVMA signals for current universe
         current_prices = {}
