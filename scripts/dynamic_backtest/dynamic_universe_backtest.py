@@ -16,7 +16,7 @@ from scripts.dynamic_backtest.monthly_trend_selector import get_monthly_universe
 from scripts.dynamic_backtest.portfolio_manager import PortfolioManager
 
 def run_dynamic_backtest(db, start_date='2020-01-01', end_date='2025-10-31', 
-                         initial_capital=100000, min_score=75, top_n=12):
+                         initial_capital=100000, min_score=75, top_n=12, use_bpt=False):
     """
     Backtest with monthly universe updates and VPVMA signals
     
@@ -36,6 +36,7 @@ def run_dynamic_backtest(db, start_date='2020-01-01', end_date='2025-10-31',
         initial_capital: Starting capital
         min_score: Minimum trend score for inclusion
         top_n: Number of stocks per universe
+        use_bpt: Enable BPT position sizing (default False)
     
     Returns:
         dict: Complete backtest results
@@ -92,10 +93,10 @@ def run_dynamic_backtest(db, start_date='2020-01-01', end_date='2025-10-31',
     print("RUNNING DYNAMIC BACKTEST")
     print("="*80)
     
-    portfolio = PortfolioManager(initial_capital=initial_capital)
+    portfolio = PortfolioManager(initial_capital=initial_capital, use_bpt=use_bpt)
     
     # FIXED: Get ALL trading dates from ALL stocks (not just one random sample!)
-    print("\n🔍 Collecting all available trading dates...")
+    print("\n📅 Collecting all available trading dates...")
     all_dates_set = set()
     for symbol, df in vpvma_data.items():
         all_dates_set.update(df['timestamp'].unique())
@@ -160,11 +161,19 @@ def run_dynamic_backtest(db, start_date='2020-01-01', end_date='2025-10-31',
             row = day_data.iloc[0]
             current_prices[symbol] = row['close']
             
-            # Process signals
+            # NEW: Get score for this symbol (for BPT)
+            score = None
+            if month_key in monthly_universes:
+                scores_df = monthly_universes[month_key]['scores']
+                symbol_score = scores_df[scores_df['symbol'] == symbol]
+                if len(symbol_score) > 0:
+                    score = symbol_score.iloc[0]['score']
+            
+            # Process signals (now with score)
             if row['buy_signal']:
-                portfolio.process_vpvma_signal(symbol, 'buy', row['close'], date_str)
+                portfolio.process_vpvma_signal(symbol, 'buy', row['close'], date_str, score=score)
             elif row['sell_signal']:
-                portfolio.process_vpvma_signal(symbol, 'sell', row['close'], date_str)
+                portfolio.process_vpvma_signal(symbol, 'sell', row['close'], date_str, score=score)
         
         # Record daily snapshot
         portfolio.record_daily_snapshot(date_str, current_prices)

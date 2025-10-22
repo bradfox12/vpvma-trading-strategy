@@ -54,6 +54,7 @@ CONFIG = {
     'initial_capital': 100000,
     'min_score': 85,      # Minimum trend score
     'top_n': 20,          # Number of stocks per universe
+    'use_bpt': False,     # Enable BPT (Best Position per Trade) sizing
 }
 
 print("\n📋 CONFIGURATION:")
@@ -70,7 +71,8 @@ results = run_dynamic_backtest(
     end_date=CONFIG['end_date'],
     initial_capital=CONFIG['initial_capital'],
     min_score=CONFIG['min_score'],
-    top_n=CONFIG['top_n']
+    top_n=CONFIG['top_n'],
+    use_bpt=CONFIG['use_bpt']  # NEW: Pass BPT flag
 )
 
 # Export results
