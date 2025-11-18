@@ -33,6 +33,7 @@ class SecureConfig:
     ALPHA_VANTAGE_KEY = os.getenv('ALPHA_VANTAGE_KEY')
     POLYGON_KEY = os.getenv('POLYGON_KEY')
     FINNHUB_KEY = os.getenv('FINNHUB_KEY')
+    EOD_API_KEY = os.getenv('EOD_API_KEY')
     
     @classmethod
     def validate(cls):
