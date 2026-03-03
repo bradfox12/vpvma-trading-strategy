@@ -49,7 +49,7 @@ SPY_MA_PERIOD = 200           # Moving average period for regime detection
                               # 200-day is institutional standard
 
 # FastExit sell bandwidth (used when SPY < 200MA)
-BEAR_SELL_BANDWIDTH = 0.04    # 2x faster exits vs normal (0.08 → 0.04)
+BEAR_SELL_BANDWIDTH = 0.032    # 2x faster exits vs normal (0.08 → 0.032) ferdaaaaaaa
                               # Formula: Sell when VPVMA < 0.96 × VPVMAS
                               # This is the "FastExit" mechanism
 

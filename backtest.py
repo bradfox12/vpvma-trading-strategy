@@ -15,7 +15,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from data.database import Database
 from main import calculate_vpvma_indicator
-from config import BUY_BANDWIDTH, SELL_BANDWIDTH
+import config
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -76,9 +76,9 @@ class ProtectedPortfolio:
     def get_sell_bandwidth(self):
         """Get adaptive sell bandwidth based on regime"""
         if self.protection_active:
-            return 0.04  # FastExit: 2x faster exits
+            return config.BEAR_SELL_BANDWIDTH  # FastExit: uses dynamic bear bandwidth from config
         else:
-            return SELL_BANDWIDTH  # Normal: 0.08
+            return config.SELL_BANDWIDTH  # Normal: uses dynamic value from config
     
     def get_equity(self, current_prices):
         """Calculate total portfolio equity"""
@@ -262,7 +262,7 @@ def run_backtest(
                 
                 # Store buy signals for ranking
                 if buy_signal:
-                    buy_threshold = (1 + BUY_BANDWIDTH) * vpvmas_val
+                    buy_threshold = (1 + config.BUY_BANDWIDTH) * vpvmas_val
                     strength = (vpvma_val - buy_threshold) / buy_threshold if buy_threshold != 0 else 0
                     
                     buy_signals_today.append({
