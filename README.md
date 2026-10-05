@@ -1,6 +1,10 @@
 # VPVMA: Volume-Price-Volume Moving Average Strategy
 
-Systematic momentum trading system with adaptive risk management, validated across 20 years of market data (2005-2025).
+Systematic momentum trading system with adaptive risk management.
+
+> **Results below predate the October 2026 fixes** (fully adjusted price history,
+> sign-safe signal bands, next-open fills, live/backtest parity) and must be
+> re-generated with `python backtest.py` before being relied on.
 
 ## Performance Summary
 
@@ -33,13 +37,17 @@ The Volume-Price-Volume Moving Average (VPVMA) indicator incorporates volume and
 ### Signal Generation
 
 **Entry signals:**
-- VPVMA crosses above (1 + BUY_BANDWIDTH) × VPVMAS
+- VPVMA was at/below VPVMAS and is now above VPVMAS + BUY_BANDWIDTH × |VPVMAS|
 - BUY_BANDWIDTH = 0.18 (highly selective)
 
 **Exit signals:**
-- VPVMA crosses below (1 - SELL_BANDWIDTH × 2) × VPVMAS
+- VPVMA was at/above VPVMAS and is now below VPVMAS − 2 × SELL_BANDWIDTH × |VPVMAS|
 - Base SELL_BANDWIDTH = 0.08
 - Adaptive adjustment based on market regime
+
+Using |VPVMAS| keeps the buy band above and the sell band below the signal line
+when VPVMAS is negative (about half of all days); the earlier (1 ± bw) × VPVMAS
+form inverted both rules on those days.
 
 ### Adaptive Risk Management
 
@@ -47,9 +55,7 @@ The Volume-Price-Volume Moving Average (VPVMA) indicator incorporates volume and
 
 **Dynamic exit adjustment:**
 - Bull market (SPY > 200MA): SELL_BANDWIDTH = 0.08 → exit at 0.84× signal line
-- Bear market (SPY < 200MA): SELL_BANDWIDTH = 0.04 → exit at 0.92× signal line
-
-This 2× faster exit during bear markets reduces exposure to catastrophic losses while maintaining full participation in bull markets.
+- Bear market (SPY < 200MA): BEAR_SELL_BANDWIDTH = 0.032 → exit at 0.936× signal line
 
 ### Validation Protocol
 
@@ -73,10 +79,10 @@ This 2× faster exit during bear markets reduces exposure to catastrophic losses
 
 ### Transaction Cost Modeling
 
-- Commission: $1 per trade
-- Slippage: 2 basis points per fill
-- No look-ahead bias (signals use only past data)
-- Realistic execution assumptions
+- Signals at the close, fills at the next open
+- Commission: $1 per fill; slippage: 2 basis points per fill
+- No look-ahead (tested: changing future prices never changes past decisions)
+- Held symbols whose data stops are closed at their last close
 
 ## Performance Across Market Regimes
 
@@ -118,28 +124,55 @@ This 2× faster exit during bear markets reduces exposure to catastrophic losses
 ## Implementation
 
 ### Technology Stack
-- Python 3.8+
-- PostgreSQL (20 years OHLCV data)
-- NumPy, Pandas (vectorized calculations)
-- Polygon.io API (market data source)
+- Python 3.12, NumPy, pandas, SQLAlchemy
+- SQLite (default) or PostgreSQL
+- EOD Historical Data (one-off historical load), Massive/Polygon.io (daily updates; free plan works)
+
+### Setup and data
+```bash
+python -m venv venv && venv/bin/pip install -r requirements.txt
+cp .env.example .env                        # set DB_TYPE, EOD_API_KEY, MARKET_API_KEY
+python scripts/fetch_eod_historical.py      # load symbols.txt from 2005 (resume: --missing-only)
+python scripts/validate_data.py             # gaps, bad bars, unadjusted splits, stale symbols
+python backtest.py --trades-csv trades.csv  # full backtest to the latest bar
+python visualize_results.py                 # charts in charts/
+```
+`symbols.txt` is the candidate universe (SPY is required). Adding delisted
+tickers reduces survivorship bias.
+
+### Daily operation
+```bash
+python run_daily_workflow.py                # data update, then orders for the next session
+python daily_portfolio_manager.py --dry-run # preview orders without saving anything
+```
+- `daily_update.py` backfills every missed session, skips market holidays and
+  applies splits/dividends to stored history before appending new bars.
+- `portfolio_state.json` is the ledger (cash + positions); back it up.
+  `trade_tracker.xlsx` and `daily_orders.html` are reports generated from it.
+- Logs are in `logs/`. Run `pytest` for the test suite (no database or API keys needed).
 
 ### Architecture
 ```
 ├── calculations/           # Core VPVMA formulas (Chio 2022)
-│   ├── vpvma_core.py      # Main indicator calculation
-│   ├── price_metrics.py   # Typical price, daily volatility
-│   ├── volume_weighted.py # VWMA calculations
-│   └── exponential_moving.py # EMA smoothing
-├── signals/                # Signal generation
-│   └── signal_generator.py
-├── protection/             # Adaptive risk management
-│   ├── market_regime.py   # Bear market detection
-│   └── adaptive_bandwidth.py # Dynamic exit adjustment
+├── signals/
+│   └── signal_generator.py # Entry/exit rules (single source of truth)
+├── protection/
+│   └── market_regime.py    # SPY 200-day regime (FastExit trigger)
 ├── data/
-│   └── database.py        # PostgreSQL interface
-├── backtest.py            # Main backtest engine
-├── config.py              # Strategy parameters
-└── visualize_results.py   # Performance analytics
+│   └── database.py         # SQLite/PostgreSQL storage + corporate-action adjustments
+├── scripts/
+│   ├── fetch_eod_historical.py # Historical load (fully adjusted OHLCV)
+│   └── validate_data.py    # Data quality checks
+├── strategy.py             # Shared decision engine (backtest + live)
+├── backtest.py             # Backtest engine (next-open fills)
+├── daily_update.py         # Daily data update
+├── daily_portfolio_manager.py # Live order generation + ledger
+├── run_daily_workflow.py   # Update + orders, for a scheduler
+├── universe_selector.py    # Monthly momentum universe
+├── config.py               # Strategy parameters
+├── research/               # Universe-metric walk-forward research
+├── tests/                  # pytest suite
+└── visualize_results.py    # Performance charts
 ```
 
 ### Key Parameters
@@ -150,7 +183,7 @@ WINDOW_SIGN = 18          # Signal line SMA period
 
 BUY_BANDWIDTH = 0.18      # Entry selectivity
 SELL_BANDWIDTH = 0.08     # Exit threshold (normal)
-BEAR_SELL_BANDWIDTH = 0.04  # Exit threshold (bear market)
+BEAR_SELL_BANDWIDTH = 0.032  # Exit threshold (bear market)
 
 SPY_MA_PERIOD = 200       # Regime detection window
 ```

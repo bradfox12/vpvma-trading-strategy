@@ -1,417 +1,214 @@
 """
-Daily Data Update Script - Fixed for Weekends
-==============================================
-Run after market close to update database with latest OHLCV data
-Automatically handles weekends and holidays
+Daily Data Update
+=================
+Brings the database up to date with the latest completed trading session.
+
+- Backfills EVERY session missed since the last stored SPY bar (not just today)
+- One grouped-daily request per session covers all tickers
+- Market holidays are detected from the data (an empty session is skipped),
+  so no hand-maintained holiday calendar is needed
+- Splits and dividends on each session are applied to stored history BEFORE the
+  new bar is inserted, keeping the series fully adjusted like the historical load
+- Bars are stored at the session date (midnight)
+
+Data source: Massive (formerly Polygon.io) REST API, MARKET_API_KEY in .env.
+Works on the free plan (5 requests/minute; ~3 requests per session).
 
 Usage:
-    python daily_update.py
-    
-Schedule with Windows Task Scheduler:
-    Time: 4:30 PM ET (Mon-Fri)
-    Action: python C:\\bkf\\daily_update.py
+    python daily_update.py            # update to the last completed session
+    python daily_update.py --dry-run  # show which sessions would be fetched
 """
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from data.database import Database
-import requests
-from time import sleep
+import argparse
 import logging
+import os
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-# Load environment variables from .env file
+import pandas as pd
+import requests
+
+from logging_setup import setup_logging
+
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(Path(__file__).resolve().parent / '.env')
 except ImportError:
-    pass  # dotenv not installed, will use system environment variables
+    pass
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('daily_update.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('daily_update')
+
+MARKET_TZ = ZoneInfo('America/New_York')
+SESSION_READY = (16, 30)         # a session's bars are fetched after 16:30 ET
+MAX_RETRIES = 5
+DEFAULT_BASE_URL = 'https://api.massive.com'
+MAX_BACKFILL_SESSIONS = 60       # beyond this, re-run the historical loader instead
+
+
+class MarketDataClient:
+    """Minimal REST client with rate-limit handling"""
+
+    def __init__(self, api_key: str, base_url: str = None, session=None, sleep=time.sleep):
+        if not api_key:
+            raise ValueError("MARKET_API_KEY is not set - add it to .env")
+        self.api_key = api_key
+        self.base_url = (base_url or os.getenv('MARKET_API_BASE_URL') or DEFAULT_BASE_URL).rstrip('/')
+        self.session = session or requests.Session()
+        self.sleep = sleep
+
+    def get(self, path_or_url: str, params: dict = None) -> dict:
+        url = path_or_url if path_or_url.startswith('http') else f"{self.base_url}{path_or_url}"
+        params = dict(params or {}, apiKey=self.api_key)
+        for attempt in range(1, MAX_RETRIES + 1):
+            response = self.session.get(url, params=params, timeout=30)
+            if response.status_code == 429:
+                wait = 15 * attempt
+                logger.warning("Rate limited (attempt %d/%d) - waiting %ds", attempt, MAX_RETRIES, wait)
+                self.sleep(wait)
+                continue
+            if response.status_code != 200:
+                raise RuntimeError(f"GET {url} -> HTTP {response.status_code}: {response.text[:200]}")
+            return response.json()
+        raise RuntimeError(f"GET {url} still rate limited after {MAX_RETRIES} attempts")
+
+    def get_all(self, path: str, params: dict) -> list:
+        """Follow next_url pagination"""
+        data = self.get(path, params)
+        results = list(data.get('results') or [])
+        while data.get('next_url'):
+            data = self.get(data['next_url'])
+            results.extend(data.get('results') or [])
+        return results
+
+    def grouped_daily(self, date: pd.Timestamp) -> pd.DataFrame:
+        """All US stock bars for one session (split-adjusted); empty on holidays"""
+        data = self.get(f"/v2/aggs/grouped/locale/us/market/stocks/{date:%Y-%m-%d}", {'adjusted': 'true'})
+        bars = pd.DataFrame(data.get('results') or [], columns=['T', 'o', 'h', 'l', 'c', 'v'])
+        return bars.rename(columns={'T': 'symbol', 'o': 'open', 'h': 'high', 'l': 'low',
+                                    'c': 'close', 'v': 'volume'})
+
+    def splits(self, date: pd.Timestamp) -> list:
+        return self.get_all('/stocks/v1/splits', {'execution_date': f"{date:%Y-%m-%d}", 'limit': 5000})
+
+    def dividends(self, date: pd.Timestamp) -> list:
+        return self.get_all('/stocks/v1/dividends', {'ex_dividend_date': f"{date:%Y-%m-%d}", 'limit': 5000})
+
+
+def last_completed_session_candidate(now: datetime = None) -> pd.Timestamp:
+    """Latest weekday whose session has closed (holidays are found from the data)"""
+    now = (now or datetime.now(MARKET_TZ)).astimezone(MARKET_TZ)
+    day = pd.Timestamp(now.date())
+    if (now.hour, now.minute) < SESSION_READY:
+        day -= pd.Timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= pd.Timedelta(days=1)
+    return day
 
 
 class DailyDataUpdater:
-    """
-    Fetches and updates daily OHLCV data for entire universe
-    Handles weekends and holidays automatically
-    """
-    
-    def __init__(self, api_key=None):
-        """
-        Initialize updater
-        
-        Args:
-            api_key: Polygon.io API key (or set POLYGON_API_KEY env variable)
-        """
-        self.db = Database(db_type='postgresql')
-        
-        # Get API key from environment or parameter
-        import os
-        self.api_key = api_key or os.getenv('MARKET_API_KEY') or os.getenv('POLYGON_API_KEY')
-        
-        if not self.api_key:
-            logger.warning("No API key found. Set MARKET_API_KEY or POLYGON_API_KEY environment variable.")
-        
-        self.base_url = "https://api.polygon.io/v2/aggs/ticker"
-    
-    def get_last_trading_day(self):
-        """
-        Get the most recent trading day (handles weekends/holidays)
-        
-        Returns:
-            datetime: Last trading day
-        """
-        today = datetime.now()
-        current_day = today.weekday()
-        current_hour = today.hour
-        
-        # If it's after 4:30 PM ET on a weekday, we can use today
-        if current_day < 5 and current_hour >= 16:  # Weekday after 4 PM
-            logger.info(f"After market close on {today.strftime('%A')} - using today's data")
-            return today
-        
-        # Otherwise, we need the previous trading day
-        if current_day == 0:  # Monday
-            target = today - timedelta(days=3)  # Friday
-            logger.info(f"It's Monday - using Friday's data ({target.date()})")
-        elif current_day == 6:  # Sunday
-            target = today - timedelta(days=2)  # Friday
-            logger.info(f"It's Sunday - using Friday's data ({target.date()})")
-        elif current_day == 5:  # Saturday
-            target = today - timedelta(days=1)  # Friday
-            logger.info(f"It's Saturday - using Friday's data ({target.date()})")
-        else:  # Tuesday-Friday before market close
-            target = today - timedelta(days=1)
-            logger.info(f"Before market close - using yesterday's data ({target.date()})")
-        
-        return target
-    
-    def verify_market_was_open(self, date):
-        """
-        Verify if market was open on a given date by checking SPY
-        
-        Args:
-            date: Date to verify
-            
-        Returns:
-            bool: True if market was open
-        """
-        date_str = date.strftime('%Y-%m-%d')
-        url = f"{self.base_url}/SPY/range/1/day/{date_str}/{date_str}"
-        
-        params = {
-            'apiKey': self.api_key,
-            'adjusted': 'true'
-        }
-        
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                return 'results' in data and len(data['results']) > 0
-        except:
-            pass
-        
-        return False
-    
-    def get_last_valid_trading_day(self):
-        """
-        Get the last valid trading day, checking if market was actually open
-        
-        Returns:
-            datetime: Last confirmed trading day
-        """
-        target = self.get_last_trading_day()
-        
-        # Verify market was open
-        attempts = 0
-        while attempts < 5:
-            logger.info(f"Checking if market was open on {target.date()}...")
-            
-            if self.verify_market_was_open(target):
-                logger.info("[OK] Confirmed: Market was open on {target.date()}")
-                return target
-            else:
-                logger.info(f"Market was closed on {target.date()} (holiday?), trying previous day...")
-                target = target - timedelta(days=1)
-                # Skip to Friday if we hit a weekend
-                while target.weekday() >= 5:
-                    target = target - timedelta(days=1)
-                attempts += 1
-        
-        # Fallback - just use what we calculated
-        return self.get_last_trading_day()
-        
-    def fetch_daily_bar(self, symbol, date=None):
-        """
-        Fetch single day's OHLCV data from Polygon.io
-        
-        Args:
-            symbol: Stock ticker
-            date: Date to fetch (defaults to last trading day)
-        
-        Returns:
-            dict with OHLCV data or None if error
-        """
-        if date is None:
-            date = self.get_last_valid_trading_day()
-        
-        date_str = date.strftime('%Y-%m-%d')
-        
-        # Polygon API endpoint
-        url = f"{self.base_url}/{symbol}/range/1/day/{date_str}/{date_str}"
-        
-        params = {
-            'apiKey': self.api_key,
-            'adjusted': 'true'
-        }
-        
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                if 'results' in data and len(data['results']) > 0:
-                    bar = data['results'][0]
-                    
-                    return {
-                        'symbol': symbol,
-                        'timestamp': pd.to_datetime(bar['t'], unit='ms'),
-                        'open': bar['o'],
-                        'high': bar['h'],
-                        'low': bar['l'],
-                        'close': bar['c'],
-                        'volume': bar['v']
-                    }
-                else:
-                    logger.debug(f"{symbol}: No data returned for {date_str}")
-                    return None
-                    
-            elif response.status_code == 429:
-                logger.warning(f"{symbol}: Rate limit hit, waiting 60s...")
-                sleep(60)
-                return self.fetch_daily_bar(symbol, date)  # Retry
-                
-            else:
-                logger.error(f"{symbol}: API error {response.status_code}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"{symbol}: Error fetching data - {e}")
-            return None
-    
-    def update_symbol(self, symbol, date=None):
-        """
-        Update single symbol with latest data
-        
-        Args:
-            symbol: Stock ticker
-            date: Date to update (defaults to last trading day)
-        
-        Returns:
-            bool: True if successful
-        """
-        if date is None:
-            date = self.get_last_valid_trading_day()
-            
-        bar = self.fetch_daily_bar(symbol, date)
-        
-        if bar is None:
-            return False
-        
-        try:
-            # Check if data already exists
-            existing = self.db.get_ohlcv_data(
-                symbol,
-                start_date=bar['timestamp'],
-                end_date=bar['timestamp']
-            )
-            
-            if len(existing) > 0:
-                logger.debug(f"{symbol}: Data already exists for {bar['timestamp'].date()}")
-                return True
-            
-            # Insert new data
-            df = pd.DataFrame([bar])
-            self.db.insert_ohlcv_data(symbol, df, replace=False)
-            
-            logger.info(f"{symbol}: [OK] Updated {bar['timestamp'].date()} - Close: ${bar['close']:.2f}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"{symbol}: Database error - {e}")
-            return False
-    
-    def update_universe(self, date=None):
-        """
-        Update entire universe with latest data
-        
-        Args:
-            date: Date to update (defaults to last trading day)
-        
-        Returns:
-            dict with update statistics
-        """
-        logger.info("="*80)
-        logger.info("DAILY DATA UPDATE - WEEKEND AWARE")
-        logger.info("="*80)
-        logger.info(f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S (%A)')}")
-        
-        if date is None:
-            date = self.get_last_valid_trading_day()
-        
-        logger.info(f"Target date: {date.strftime('%Y-%m-%d (%A)')}")
-        logger.info(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Get universe from database
-        symbols = self.db.list_symbols()
-        logger.info(f"Universe size: {len(symbols)} symbols")
-        
-        # Check if we already have data for this date
-        logger.info("\nChecking if update needed...")
-        sample_df = self.db.get_ohlcv_data(
-            'SPY',
-            start_date=date,
-            end_date=date
-        )
-        
-        if len(sample_df) > 0:
-            logger.info("[OK] Database already has data for target date")
-            logger.info("  No update needed - data is current")
-            return {
-                'date': date,
-                'total': len(symbols),
-                'successful': len(symbols),
-                'failed': 0,
-                'success_rate': 100,
-                'already_current': True
-            }
-        
-        # Update each symbol
-        successful = 0
-        failed = 0
-        already_exists = 0
-        
-        logger.info("\nUpdating symbols...")
-        for idx, symbol in enumerate(symbols, 1):
-            if idx % 10 == 0:
-                logger.info(f"Progress: [{idx}/{len(symbols)}] {idx/len(symbols)*100:.1f}%")
-            
-            result = self.update_symbol(symbol, date)
-            
-            if result:
-                successful += 1
-            else:
-                failed += 1
-            
-            # Rate limiting: 5 calls per second max for free tier
-            if idx % 5 == 0:
-                sleep(1.2)
-        
-        # Summary
-        logger.info("\n" + "="*80)
-        logger.info("UPDATE COMPLETE")
-        logger.info("="*80)
-        logger.info(f"Date: {date.strftime('%Y-%m-%d (%A)')}")
-        logger.info(f"Successful: {successful}/{len(symbols)}")
-        logger.info(f"Failed: {failed}/{len(symbols)}")
-        logger.info(f"Success rate: {successful/len(symbols)*100:.1f}%")
-        logger.info(f"Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info("="*80)
-        
-        return {
-            'date': date,
-            'total': len(symbols),
-            'successful': successful,
-            'failed': failed,
-            'success_rate': successful/len(symbols)*100
-        }
-    
-    def verify_update(self, date=None):
-        """
-        Verify that update was successful by checking data quality
-        
-        Args:
-            date: Date to verify
-        
-        Returns:
-            dict with verification results
-        """
-        if date is None:
-            date = self.get_last_valid_trading_day()
-        
-        logger.info("\n" + "="*80)
-        logger.info("VERIFICATION")
-        logger.info("="*80)
-        
-        symbols = self.db.list_symbols()
-        issues = []
-        
-        for symbol in symbols[:10]:  # Check first 10 symbols
-            try:
-                df = self.db.get_ohlcv_data(
-                    symbol,
-                    start_date=date - timedelta(days=5),
-                    end_date=date
-                )
-                
-                if len(df) == 0:
-                    issues.append(f"{symbol}: No data found")
-                elif df['timestamp'].max() < pd.Timestamp(date):
-                    issues.append(f"{symbol}: Latest data is {df['timestamp'].max().date()}")
-                    
-            except Exception as e:
-                issues.append(f"{symbol}: Error - {e}")
-        
-        if len(issues) == 0:
-            logger.info("[OK] Verification passed - data looks good!")
-        else:
-            logger.warning(f"Found {len(issues)} potential issues:")
-            for issue in issues:
-                logger.warning(f"  - {issue}")
-        
-        return {
-            'issues_found': len(issues),
-            'issues': issues
-        }
+    """Fetches missing sessions and keeps stored history adjusted"""
+
+    def __init__(self, db, client: MarketDataClient):
+        self.db = db
+        self.client = client
+
+    def sessions_to_fetch(self, now: datetime = None) -> list:
+        last = self.db.latest_timestamp('SPY')
+        if last is None:
+            raise RuntimeError("No SPY data in the database - run scripts/fetch_eod_historical.py first")
+        target = last_completed_session_candidate(now)
+        days = list(pd.bdate_range(last.normalize() + pd.Timedelta(days=1), target))
+        if len(days) > MAX_BACKFILL_SESSIONS:
+            raise RuntimeError(
+                f"{len(days)} sessions missing since {last.date()} - re-run the historical loader "
+                f"(scripts/fetch_eod_historical.py) instead of backfilling day by day")
+        return days
+
+    def apply_corporate_actions(self, date: pd.Timestamp, symbols: set) -> int:
+        """Back-adjust stored bars for splits/dividends effective on `date`"""
+        applied = 0
+        for split in self.client.splits(date):
+            symbol = split.get('ticker')
+            if symbol not in symbols or not split.get('split_from') or not split.get('split_to'):
+                continue
+            factor = float(split['split_from']) / float(split['split_to'])
+            applied += self.db.apply_adjustment(
+                symbol, date, 'split', factor, f"{split['split_to']}-for-{split['split_from']} split")
+
+        dividends = [d for d in self.client.dividends(date)
+                     if d.get('ticker') in symbols and d.get('cash_amount')
+                     and d.get('currency', 'USD') == 'USD']
+        if dividends:
+            prev_close = self.db.last_closes_before([d['ticker'] for d in dividends], date)
+            for div in dividends:
+                symbol, cash = div['ticker'], float(div['cash_amount'])
+                close = prev_close.get(symbol)
+                if not close or cash >= close:
+                    logger.warning("%s: skipping dividend %.4f (previous close %s)", symbol, cash, close)
+                    continue
+                applied += self.db.apply_adjustment(
+                    symbol, date, 'dividend', 1 - cash / close, f"${cash:.4f} cash")
+        return applied
+
+    def update(self, now: datetime = None, dry_run: bool = False) -> dict:
+        symbols = set(self.db.list_symbols())
+        days = self.sessions_to_fetch(now)
+        logger.info("Universe: %d symbols | sessions to fetch: %s", len(symbols),
+                    ', '.join(f"{d:%Y-%m-%d}" for d in days) or 'none (up to date)')
+        stats = {'sessions': 0, 'holidays': 0, 'bars': 0, 'actions': 0, 'missing': {}}
+        if dry_run:
+            return stats
+
+        for day in days:
+            bars = self.client.grouped_daily(day)
+            if bars.empty:
+                logger.info("%s: no session (market holiday)", day.date())
+                stats['holidays'] += 1
+                continue
+            bars = bars[bars['symbol'].isin(symbols)]
+            if 'SPY' not in set(bars['symbol']):
+                raise RuntimeError(f"{day.date()}: session data has no SPY bar - aborting to avoid a partial update")
+
+            # Adjust stored history first, then append the (already adjusted) new bars
+            stats['actions'] += self.apply_corporate_actions(day, symbols)
+            inserted = self.db.insert_bars(bars.assign(timestamp=day))
+
+            missing = sorted(symbols - set(bars['symbol']))
+            if missing:
+                stats['missing'][f"{day:%Y-%m-%d}"] = missing
+                logger.warning("%s: no bar for %d symbols (halted/delisted?): %s",
+                               day.date(), len(missing), ', '.join(missing[:20]))
+            logger.info("%s: inserted %d bars", day.date(), inserted)
+            stats['sessions'] += 1
+            stats['bars'] += inserted
+        return stats
 
 
 def main():
-    """
-    Main execution function
-    """
-    updater = DailyDataUpdater()
-    
-    # Update with last trading day's data
-    results = updater.update_universe()
-    
-    # Only verify if we actually updated
-    if not results.get('already_current', False):
-        verification = updater.verify_update()
-    
-    # Return exit code (0 = success, 1 = issues)
-    if results['success_rate'] > 95 or results.get('already_current', False):
-        logger.info("\n[SUCCESS] Daily update completed successfully!")
-        return 0
-    else:
-        logger.warning("\n[WARNING] Daily update completed with issues")
+    parser = argparse.ArgumentParser(description='Update the database to the last completed session')
+    parser.add_argument('--dry-run', action='store_true', help='List sessions to fetch without fetching')
+    args = parser.parse_args()
+
+    setup_logging('daily_update')
+    from data.database import Database
+    try:
+        db = Database()
+        db.create_tables()
+        updater = DailyDataUpdater(db, MarketDataClient(os.getenv('MARKET_API_KEY')))
+        stats = updater.update(dry_run=args.dry_run)
+    except Exception:
+        logger.exception("Daily update FAILED")
         return 1
+
+    logger.info("Update complete: %d sessions, %d holidays, %d bars, %d corporate actions",
+                stats['sessions'], stats['holidays'], stats['bars'], stats['actions'])
+    return 0
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    sys.exit(main())

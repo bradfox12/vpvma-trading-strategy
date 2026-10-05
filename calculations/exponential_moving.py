@@ -5,7 +5,7 @@ Implements formulas 4.2-5 (ESVMap) and 4.2-6 (ElVMap)
 
 import numpy as np
 import pandas as pd
-from config import WINDOW_FAST, WINDOW_SLOW
+import config
 
 
 def calculate_ema(data: np.ndarray, period: int) -> np.ndarray:
@@ -33,7 +33,7 @@ def calculate_esvmap(svwma: np.ndarray, daily_volatility: np.ndarray) -> np.ndar
     """
     Calculate EMA of Short-term Volume-Price Product (ESVMap) - Formula 4.2-5
     
-    ESVMap = EMA(SVWMA × DV, WINDOW_FAST)
+    ESVMap = EMA(SVWMA × DV, config.WINDOW_FAST)
     
     Args:
         svwma: Short-term volume-weighted moving average
@@ -49,7 +49,7 @@ def calculate_esvmap(svwma: np.ndarray, daily_volatility: np.ndarray) -> np.ndar
     svwma_dv_product = svwma * daily_volatility
     
     # Apply EMA with short-term period
-    esvmap = calculate_ema(svwma_dv_product, WINDOW_FAST)
+    esvmap = calculate_ema(svwma_dv_product, config.WINDOW_FAST)
     
     return esvmap
 
@@ -58,7 +58,7 @@ def calculate_elvmap(lvwma: np.ndarray, daily_volatility: np.ndarray) -> np.ndar
     """
     Calculate EMA of Long-term Volume-Price Product (ElVMap) - Formula 4.2-6
     
-    ElVMap = EMA(LVWMA × DV, WINDOW_SLOW)
+    ElVMap = EMA(LVWMA × DV, config.WINDOW_SLOW)
     
     Args:
         lvwma: Long-term volume-weighted moving average
@@ -74,6 +74,6 @@ def calculate_elvmap(lvwma: np.ndarray, daily_volatility: np.ndarray) -> np.ndar
     lvwma_dv_product = lvwma * daily_volatility
     
     # Apply EMA with long-term period
-    elvmap = calculate_ema(lvwma_dv_product, WINDOW_SLOW)
+    elvmap = calculate_ema(lvwma_dv_product, config.WINDOW_SLOW)
     
     return elvmap

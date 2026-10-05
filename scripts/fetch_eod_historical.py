@@ -1,195 +1,145 @@
 """
-Fetch 20 years of historical data from EOD Historical Data
-Based on working fetch_and_store.py pattern - SECURE VERSION
+Load fully adjusted daily history from EOD Historical Data into the database
+
+Each symbol's bars are replaced in one transaction. Open/high/low/close are
+all adjusted for splits AND dividends (volume inversely), so every bar is
+internally consistent. After this load, daily_update.py keeps the data current
+and applies new splits/dividends itself.
+
+Usage:
+    python scripts/fetch_eod_historical.py                     # all of symbols.txt from 2005
+    python scripts/fetch_eod_historical.py --start 2005-01-01 --symbols AAPL MSFT SPY
+    python scripts/fetch_eod_historical.py --missing-only      # resume an interrupted load
+
+Requires EOD_API_KEY in .env (any plan with US end-of-day history).
 """
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from data.database import Database
-from datetime import datetime
-import time
-import requests
-import pandas as pd
+import argparse
+import logging
 import os
-from dotenv import load_dotenv
+import time
 
-# Load environment variables
-load_dotenv()
+import pandas as pd
+import requests
 
-print("="*80)
-print("FETCHING 20 YEARS OF HISTORICAL DATA - EOD HISTORICAL")
-print("EOD Historical Data All-World Essential ($19.99/mo)")
-print("="*80)
+from logging_setup import setup_logging
 
-# Configuration - API key from environment
-EOD_API_KEY = os.getenv('EOD_API_KEY')
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SYMBOLS_FILE = PROJECT_ROOT / 'symbols.txt'
+FAILED_FILE = PROJECT_ROOT / 'logs' / 'failed_symbols.txt'
 
-if not EOD_API_KEY:
-    print("\n❌ ERROR: EOD_API_KEY not found!")
-    print("\nPlease add your API key to the .env file:")
-    print('  echo "EOD_API_KEY=your_key_here" >> .env')
-    print("\nOr export it temporarily:")
-    print('  export EOD_API_KEY="your_key_here"')
-    sys.exit(1)
+logger = logging.getLogger('fetch_eod_historical')
 
-# Your symbols
-symbols = [
-    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA',
-    'NFLX', 'AMD', 'INTC', 'QCOM', 'AVGO', 'ORCL', 'CRM',
-    'SHOP', 'UBER', 'LYFT', 'COIN', 'RBLX', 'PLTR', 'ABNB',
-    'SNAP', 'SQ', 'ZM', 'ADBE', 'NOW', 'DDOG', 'SNOW',
-    'DIS', 'BA', 'CAT', 'GE', 'UNH', 'JPM', 'BAC', 'MS',
-    'C', 'GS', 'MA', 'V', 'COST', 'HD', 'NKE', 'MCD',
-    'WMT', 'PG', 'KO', 'PEP', 'JNJ', 'PFE', 'ABBV', 'LMT',
-    'RTX', 'HON', 'UPS', 'FDX',
-    'SPY', 'QQQ'
-]
 
-# 20 years of history!
-end_date = datetime.now()
-start_date = datetime(2005, 1, 1)
+def read_symbols(path: Path) -> list:
+    lines = (line.split('#')[0].strip().upper() for line in path.read_text().splitlines())
+    return sorted({s for s in lines if s})
 
-print(f"\nFetching from: {start_date.date()} to {end_date.date()}")
-print(f"Symbols: {len(symbols)} stocks")
-print(f"EOD Historical provides full history back to 2000+")
-print("="*80)
 
-# Initialize database
-db = Database(db_type='postgresql')
+def eod_ticker(symbol: str) -> str:
+    """Database/Massive format (BRK.B) -> EOD format (BRK-B.US)"""
+    return f"{symbol.replace('.', '-')}.US"
 
-def fetch_eod_historical(symbol, api_key, start_date, end_date):
-    """Fetch data from EOD Historical API"""
-    url = f"https://eodhistoricaldata.com/api/eod/{symbol}.US"
-    
-    params = {
-        'api_token': api_key,
-        'from': start_date.strftime('%Y-%m-%d'),
-        'to': end_date.strftime('%Y-%m-%d'),
-        'period': 'd',
-        'fmt': 'json'
-    }
-    
-    response = requests.get(url, params=params, timeout=30)
-    
-    if response.status_code != 200:
-        raise Exception(f"API error: {response.status_code}")
-    
-    data = response.json()
-    
-    if not data:
-        return pd.DataFrame()
-    
-    # Convert to DataFrame - avoid duplicate column names
-    raw_df = pd.DataFrame(data)
-    
-    # Build clean DataFrame with proper columns
-    df = pd.DataFrame({
+
+def adjust_ohlcv(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fully adjusted OHLCV from EOD's raw prices + adjusted_close.
+
+    Open/high/low are scaled by the same split/dividend factor as the close,
+    and volume inversely, so each bar is internally consistent. (Storing the
+    adjusted close next to raw open/high/low corrupts typical price and daily
+    volatility on every bar before a split or dividend.)
+    """
+    raw_df = raw_df[raw_df['close'] > 0]
+    factor = raw_df['adjusted_close'] / raw_df['close']
+    return pd.DataFrame({
         'timestamp': pd.to_datetime(raw_df['date']),
-        'open': raw_df['open'],
-        'high': raw_df['high'],
-        'low': raw_df['low'],
-        'close': raw_df['adjusted_close'],  # Use adjusted for splits/dividends
-        'volume': raw_df['volume']
-    })
-    
-    return df
+        'open': raw_df['open'] * factor,
+        'high': raw_df['high'] * factor,
+        'low': raw_df['low'] * factor,
+        'close': raw_df['adjusted_close'],
+        'volume': (raw_df['volume'] / factor).round().astype('int64'),
+    }).reset_index(drop=True)
 
-successful = []
-failed = []
-data_summary = {}
 
-for i, symbol in enumerate(symbols, 1):
-    print(f"\n[{i}/{len(symbols)}] {symbol}", end=' ')
-    print("-" * 40)
-    
-    try:
-        print(f"  Requesting data from {start_date.date()}...", end=' ')
-        
-        df = fetch_eod_historical(symbol, EOD_API_KEY, start_date, end_date)
-        
-        if len(df) == 0:
-            print("✗ No data returned")
+def fetch_eod_historical(symbol, api_key, start_date, end_date, session=requests) -> pd.DataFrame:
+    """Fully adjusted daily bars for one symbol (empty DataFrame if none)"""
+    response = session.get(
+        f"https://eodhd.com/api/eod/{eod_ticker(symbol)}",
+        params={'api_token': api_key, 'from': f"{start_date:%Y-%m-%d}", 'to': f"{end_date:%Y-%m-%d}",
+                'period': 'd', 'fmt': 'json'},
+        timeout=60,
+    )
+    if response.status_code == 429:
+        raise RuntimeError("rate limited (429)")
+    if response.status_code != 200:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+    data = response.json()
+    return adjust_ohlcv(pd.DataFrame(data)) if data else pd.DataFrame()
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Load adjusted daily history from EOD Historical Data')
+    parser.add_argument('--symbols', nargs='*', help='Tickers to load (default: symbols.txt)')
+    parser.add_argument('--symbols-file', type=Path, default=DEFAULT_SYMBOLS_FILE)
+    parser.add_argument('--start', default='2005-01-01')
+    parser.add_argument('--missing-only', action='store_true', help='Skip symbols already in the database')
+    args = parser.parse_args()
+
+    setup_logging('fetch_eod_historical')
+    from data.database import Database
+
+    api_key = os.getenv('EOD_API_KEY')
+    if not api_key:
+        logger.error("EOD_API_KEY not set - add it to .env")
+        return 1
+
+    symbols = sorted({s.upper() for s in args.symbols}) if args.symbols else read_symbols(args.symbols_file)
+    if 'SPY' not in symbols:
+        symbols.append('SPY')  # required for the trading calendar and market regime
+
+    db = Database()
+    db.create_tables()
+    if args.missing_only:
+        have = set(db.list_symbols())
+        symbols = [s for s in symbols if s not in have]
+
+    start, end = pd.Timestamp(args.start), pd.Timestamp.now().normalize()
+    logger.info("Loading %d symbols from %s to %s", len(symbols), start.date(), end.date())
+
+    failed = []
+    for i, symbol in enumerate(symbols, 1):
+        for attempt in range(3):
+            try:
+                df = fetch_eod_historical(symbol, api_key, start, end)
+                break
+            except Exception as e:
+                logger.warning("[%d/%d] %s: %s (attempt %d)", i, len(symbols), symbol, e, attempt + 1)
+                time.sleep(10 * (attempt + 1))
+        else:
             failed.append(symbol)
             continue
-        
-        # Calculate actual date range
-        actual_start = df['timestamp'].min()
-        actual_end = df['timestamp'].max()
-        years_of_data = (actual_end - actual_start).days / 365.25
-        
-        print(f"✓ Got {len(df)} records")
-        print(f"  Actual range: {actual_start.date()} to {actual_end.date()}")
-        print(f"  Years of data: {years_of_data:.1f}")
-        
-        # Store in PostgreSQL using your Database class (replace=True deletes old data)
-        print(f"  Storing in database...", end=' ')
+
+        if df.empty:
+            logger.warning("[%d/%d] %s: no data returned", i, len(symbols), symbol)
+            failed.append(symbol)
+            continue
         db.insert_ohlcv_data(symbol, df, replace=True)
-        print("✓")
-        
-        successful.append(symbol)
-        data_summary[symbol] = {
-            'records': len(df),
-            'start': actual_start,
-            'end': actual_end,
-            'years': years_of_data
-        }
-        
-        # Rate limiting - be polite to EOD API
-        if i < len(symbols):
-            wait_time = 1
-            time.sleep(wait_time)
-        
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupted by user!")
-        print(f"Progress: {len(successful)}/{len(symbols)} symbols completed")
-        break
-        
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        failed.append(symbol)
-        
-        # If rate limited, wait longer
-        if "429" in str(e) or "Too Many Requests" in str(e):
-            print("  Rate limit hit. Waiting 10 seconds...")
-            time.sleep(10)
+        logger.info("[%d/%d] %s: %d bars %s to %s", i, len(symbols), symbol, len(df),
+                    df['timestamp'].min().date(), df['timestamp'].max().date())
+        time.sleep(0.2)
 
-# Detailed Summary
-print("\n" + "="*80)
-print("DETAILED SUMMARY")
-print("="*80)
+    if failed:
+        FAILED_FILE.parent.mkdir(exist_ok=True)
+        FAILED_FILE.write_text('\n'.join(failed) + '\n')
+        logger.error("%d symbols failed (listed in %s): %s", len(failed), FAILED_FILE, ', '.join(failed))
+    logger.info("Done. Next: python scripts/validate_data.py")
+    return 1 if 'SPY' in failed else 0
 
-if successful:
-    print(f"\n✓ Successfully fetched {len(successful)} symbols:\n")
-    
-    for symbol in successful:
-        info = data_summary[symbol]
-        print(f"  {symbol:6} | {info['records']:4} records | "
-              f"{info['start'].date()} to {info['end'].date()} | "
-              f"{info['years']:.1f} years")
-    
-    # Calculate totals
-    total_records = sum(info['records'] for info in data_summary.values())
-    avg_years = sum(info['years'] for info in data_summary.values()) / len(successful)
-    
-    print(f"\n  TOTALS: {total_records:,} records | Avg: {avg_years:.1f} years per symbol")
 
-if failed:
-    print(f"\n✗ Failed: {', '.join(failed)}")
-
-print(f"\n{'='*80}")
-print(f"Symbols in database: {db.list_symbols()}")
-print("\n🎉 20-year historical data fetch complete!")
-
-print(f"\n⚠️  REMINDER: Cancel EOD subscription in 25 days!")
-print(f"📅 Set reminder for: {(pd.Timestamp.now() + pd.Timedelta(days=25)).strftime('%Y-%m-%d')}")
-
-print("\n" + "="*80)
-print("NEXT STEPS:")
-print("="*80)
-print("1. Verify data quality:")
-print("   python scripts/verify_historical_data.py")
-print("\n2. Run 20-year dynamic backtest:")
-print("   python scripts/run_dynamic_backtest.py")
-print("="*80)
+if __name__ == '__main__':
+    sys.exit(main())

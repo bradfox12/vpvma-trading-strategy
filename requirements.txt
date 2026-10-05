@@ -1,7 +1,13 @@
-numpy>=1.21.0
-pandas>=1.3.0
-python-dotenv>=0.19.0
-sqlalchemy>=1.4.0
-psycopg2-binary>=2.9.0  # For PostgreSQL
-# pymysql>=1.0.0  # Uncomment for MySQL
-requests>=2.26.0
+# Versions tested together (Python 3.12). Install: pip install -r requirements.txt
+numpy==2.5.3
+pandas==3.0.6
+python-dotenv==1.2.4
+SQLAlchemy==2.1.3
+psycopg2-binary==2.9.13   # PostgreSQL driver
+requests==2.34.2
+openpyxl==3.1.5           # trade_tracker.xlsx
+matplotlib==3.11.2        # visualize_results.py
+seaborn==0.13.2           # visualize_results.py
+
+# Development
+pytest==9.1.1

@@ -1,9 +1,7 @@
 """
-Data package for VPVMA indicator
-Handles database operations and API data fetching
+Data package: database access for daily OHLCV bars
 """
 
 from .database import Database
-from .api_client import MarketDataAPI
 
-__all__ = ['Database', 'MarketDataAPI']
+__all__ = ['Database']

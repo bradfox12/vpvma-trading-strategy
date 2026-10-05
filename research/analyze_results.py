@@ -140,10 +140,9 @@ def print_validation_summary(df):
     
     print(f"\nConfigurations tested: {len(df)}")
     
-    # Sort by Sharpe
-    df = df.sort_values('sharpe', ascending=False)
-    
-    print(f"\n📊 VALIDATION RANKINGS:")
+    # Keep the saved order: row 0 is the configuration chosen on TRAINING data.
+    # Re-sorting by holdout Sharpe would turn the holdout into a selection step.
+    print(f"\n📊 VALIDATION RESULTS (in training-rank order):")
     print("-" * 80)
     
     for i, row in df.iterrows():
@@ -168,10 +167,12 @@ def print_validation_summary(df):
         else:
             print(f"   ❌ Below baseline CAGR by {abs(cagr_vs_baseline):.2f}%")
     
-    # Winner
+    # The pre-registered choice is the top TRAINING configuration
     winner = df.iloc[0]
     print(f"\n" + "="*80)
-    print(f"🏆 WINNER: {winner['metric']} (Universe size: {int(winner['universe_size'])})")
+    print(f"🏆 CHOSEN ON TRAINING DATA: {winner['metric']} (Universe size: {int(winner['universe_size'])})")
+    if len(df) > 1:
+        print("⚠️  Several configs were holdout-tested; only the first is an out-of-sample result.")
     print(f"="*80)
     print(f"Sharpe: {winner['sharpe']:.3f} (baseline: {BASELINE_METRICS['sharpe']:.3f})")
     print(f"CAGR: {winner['cagr']:.2f}% (baseline: {BASELINE_METRICS['cagr']:.2f}%)")
@@ -197,9 +198,9 @@ def print_recommendations(training_df, validation_df):
     
     # Find best validation performer
     if validation_df is not None and len(validation_df[validation_df['status'] == 'success']) > 0:
-        val_winner = validation_df[validation_df['status'] == 'success'].sort_values('sharpe', ascending=False).iloc[0]
+        val_winner = validation_df[validation_df['status'] == 'success'].iloc[0]
         
-        print(f"\n✅ BEST VALIDATION PERFORMER:")
+        print(f"\n✅ TRAINING-SELECTED CONFIG ON HOLDOUT:")
         print(f"   • {val_winner['metric']} (size {int(val_winner['universe_size'])})")
         print(f"   • Sharpe: {val_winner['sharpe']:.3f}")
         

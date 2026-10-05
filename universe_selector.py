@@ -17,227 +17,144 @@ Usage:
     # Returns: List of top 100 symbols by momentum
 """
 
+import json
+import logging
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+
+import config
 from data.database import Database
+from strategy import rank_by_momentum
+
+logger = logging.getLogger(__name__)
+
+# Refuse to rebuild the universe when fewer than this fraction of qualified
+# symbols have current data (e.g. the daily update only partly succeeded)
+MIN_SCORED_FRACTION = 0.8
 
 
 class UniverseSelector:
     """
     Selects top N stocks by momentum for VPVMA trading
-    
+
     Rebalances monthly on the 1st trading day of each month.
-    Caches universe to avoid recalculation during the month.
+    The selection is cached in memory and, if cache_file is given, on disk so
+    separate daily runs within a month keep the same universe.
     """
-    
+
     def __init__(
         self,
         db: Database,
-        universe_size: int = 100,
-        momentum_period: int = 20,
+        universe_size: int = None,
+        momentum_period: int = None,
         min_data_days: int = None,  # Auto-calculated if not specified
-        exclude_symbols: Optional[List[str]] = None
+        exclude_symbols: Optional[List[str]] = None,
+        cache_file: Optional[Path] = None
     ):
         """
         Initialize universe selector
-        
+
         Args:
             db: Database instance
-            universe_size: Number of stocks to select (default: 100)
-            momentum_period: Lookback period in days (default: 20)
+            universe_size: Number of stocks to select (default: config.UNIVERSE_SIZE)
+            momentum_period: Lookback period in bars (default: config.MOMENTUM_PERIOD)
             min_data_days: Minimum days of data required (default: momentum_period + 1)
             exclude_symbols: List of symbols to exclude (default: None)
+            cache_file: JSON file persisting the monthly selection between runs
         """
         self.db = db
-        self.universe_size = universe_size
-        self.momentum_period = momentum_period
-        # Default to momentum_period + 1 if not specified
-        self.min_data_days = min_data_days if min_data_days is not None else (momentum_period + 1)
+        self.universe_size = universe_size or config.UNIVERSE_SIZE
+        self.momentum_period = momentum_period or config.MOMENTUM_PERIOD
+        self.min_data_days = min_data_days if min_data_days is not None else (self.momentum_period + 1)
         self.exclude_symbols = exclude_symbols or []
-        
+        self.cache_file = Path(cache_file) if cache_file else None
+
         # Cache
         self._cached_universe = None
         self._cached_month = None
         self._cached_scores = None
-        
+        self._load_cache()
+
         # Get all qualified symbols once
         self._all_symbols = self._get_qualified_symbols()
-        
-        print(f"✅ UniverseSelector initialized")
-        print(f"   Universe size: {self.universe_size} stocks")
-        print(f"   Momentum period: {self.momentum_period} days")
-        print(f"   Excluded: {self.exclude_symbols}")
-        print(f"   Qualified symbols: {len(self._all_symbols)}")
-    
+
+        logger.info("UniverseSelector initialized: size=%d, momentum=%d bars, excluded=%s, qualified=%d",
+                    self.universe_size, self.momentum_period, self.exclude_symbols, len(self._all_symbols))
+
+    def _load_cache(self):
+        if self.cache_file is None or not self.cache_file.exists():
+            return
+        try:
+            data = json.loads(self.cache_file.read_text())
+            self._cached_month = data['month']
+            self._cached_universe = data['symbols']
+            self._cached_scores = pd.DataFrame(data.get('scores', []),
+                                               columns=['symbol', 'momentum_score', 'current_price', 'past_price'])
+            logger.info("Loaded cached universe for %s (%d symbols) from %s",
+                        self._cached_month, len(self._cached_universe), self.cache_file)
+        except Exception:
+            logger.exception("Could not read universe cache %s - will recalculate", self.cache_file)
+
+    def _save_cache(self):
+        if self.cache_file is None:
+            return
+        payload = {
+            'month': self._cached_month,
+            'symbols': self._cached_universe,
+            'scores': self._cached_scores.to_dict('records') if self._cached_scores is not None else [],
+            'saved_at': datetime.now().isoformat(timespec='seconds'),
+        }
+        tmp = self.cache_file.with_suffix('.tmp')
+        tmp.write_text(json.dumps(payload, indent=2, default=float))
+        tmp.replace(self.cache_file)
+
     def _get_qualified_symbols(self) -> List[str]:
         """
-        Get all symbols with sufficient historical data
-        
+        Symbols with enough history for the indicator (INDICATOR_LOOKBACK_DAYS)
+        and a bar within the last month, minus exclude_symbols
+        """
+        ranges = self.db.symbol_ranges()
+        now = pd.Timestamp.now().normalize()
+        ok = ((ranges['first'] <= now - timedelta(days=config.INDICATOR_LOOKBACK_DAYS))
+              & (ranges['last'] >= now - timedelta(days=31)))
+        excluded = set(self.exclude_symbols)
+        return [sym for sym in ranges.loc[ok, 'symbol'] if sym not in excluded]
+
+    def _calculate_momentum_scores(self, date: pd.Timestamp) -> pd.DataFrame:
+        """
+        Momentum scores for all qualified symbols using data up to `date`
+
         Returns:
-            List of qualified symbols (excludes symbols in exclude_symbols list)
+            DataFrame [symbol, momentum_score, current_price, past_price], sorted descending
         """
-        # Build exclusion clause
-        if self.exclude_symbols:
-            exclude_clause = " AND symbol NOT IN ({})".format(
-                ','.join([f"'{s}'" for s in self.exclude_symbols])
-            )
-        else:
-            exclude_clause = ""
-        
-        query = f"""
-            SELECT DISTINCT symbol
-            FROM ohlcv_data
-            WHERE 1=1{exclude_clause}
-            GROUP BY symbol
-            HAVING MIN(timestamp) <= '2018-01-01'
-            AND MAX(timestamp) >= CURRENT_DATE - INTERVAL '1 month'
-            ORDER BY symbol
-        """
-        
-        df = pd.read_sql(query, self.db.engine)
-        symbols = df['symbol'].tolist()
-        
-        return symbols
-    
-    def _calculate_momentum_scores(
-        self,
-        date: pd.Timestamp
-    ) -> pd.DataFrame:
-        """
-        Calculate momentum scores for all symbols at given date
-        
-        Momentum = (price_today / price_N_days_ago) - 1
-        
-        Args:
-            date: Date to calculate momentum for
-        
-        Returns:
-            DataFrame with columns: [symbol, momentum_score, current_price]
-            Sorted by momentum_score descending
-        """
-        momentum_data = []
-        
-        # Get data from lookback period to current date
-        # Use 3x buffer to account for weekends and holidays
-        # 20 trading days ≈ 28 calendar days, so 60 days buffer ensures we get 21+ trading days
+        # 3x buffer: 20 trading days ~ 28 calendar days
         lookback_date = date - timedelta(days=self.momentum_period * 3)
-        
-        # WEEKEND FIX: Use most recent available date from database
-        # On Mondays/holidays, requested date may not exist yet in database
-        try:
-            spy_check = self.db.get_ohlcv_data('SPY', start_date=lookback_date, end_date=date)
-            if not spy_check.empty:
-                most_recent_date = spy_check['timestamp'].max()
-                if most_recent_date < date:
-                    print(f"   📅 Using most recent data: {most_recent_date} (requested: {date})")
-                    date = most_recent_date
-                else:
-                    print(f"   📅 Query date: {date} (type: {type(date)})")
-                print(f"   📅 Lookback range: {lookback_date} to {date}")
-        except Exception as e:
-            print(f"   ⚠️ Could not check most recent date: {e}")
-        
-        symbols_checked = 0
-        symbols_insufficient_data = 0
-        symbols_insufficient_recent = 0
-        
+
+        closes = {}
+        failed = 0
         for symbol in self._all_symbols:
             try:
-                symbols_checked += 1
-                
-                # Get price data
-                df = self.db.get_ohlcv_data(
-                    symbol,
-                    start_date=lookback_date,
-                    end_date=date
-                )
-                
-                if symbols_checked <= 3:
-                    print(f"   DEBUG {symbol}:")
-                    print(f"          Query returned: {len(df)} rows")
-                    if not df.empty:
-                        print(f"          Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
-                
-                if len(df) < self.min_data_days:
-                    symbols_insufficient_data += 1
-                    if symbols_checked <= 3:
-                        print(f"          ❌ FAILED: {len(df)} < {self.min_data_days} (min_data_days)")
-                    continue
-                
-                # Get recent N+1 days for momentum calculation
-                # No need to filter by date - get_ohlcv_data already did that
-                recent_data = df.tail(self.momentum_period + 1)
-                
-                if len(recent_data) < self.momentum_period + 1:
-                    symbols_insufficient_recent += 1
-                    if symbols_checked <= 3:
-                        print(f"          ❌ FAILED: recent={len(recent_data)} < {self.momentum_period + 1} (need 21 days)")
-                    continue
-                
-                if symbols_checked <= 3:
-                    print(f"          ✅ SUCCESS: Calculated momentum")
-                
-                # Calculate momentum
-                current_price = recent_data['close'].iloc[-1]
-                past_price = recent_data['close'].iloc[0]
-                
-                if past_price <= 0:  # Sanity check
-                    continue
-                
-                momentum_score = (current_price / past_price) - 1
-                
-                momentum_data.append({
-                    'symbol': symbol,
-                    'momentum_score': momentum_score,
-                    'current_price': current_price,
-                    'past_price': past_price
-                })
-                
-            except Exception as e:
-                # Skip symbols with data issues
+                df = self.db.get_ohlcv_data(symbol, start_date=lookback_date, end_date=date)
+            except Exception:
+                logger.exception("%s: failed to load data for momentum", symbol)
+                failed += 1
                 continue
-        
-        # Create DataFrame and sort by momentum
-        momentum_df = pd.DataFrame(momentum_data)
-        
-        if len(momentum_df) > 0:
-            momentum_df = momentum_df.sort_values('momentum_score', ascending=False)
-        
-        # Print summary
-        print(f"   📊 Results: {len(momentum_df)} valid / {symbols_checked} checked")
-        if symbols_insufficient_data > 0:
-            print(f"      ❌ {symbols_insufficient_data} failed: insufficient data (< {self.min_data_days} days)")
-        if symbols_insufficient_recent > 0:
-            print(f"      ❌ {symbols_insufficient_recent} failed: insufficient recent data (< {self.momentum_period + 1} days)")
-        
-        return momentum_df
-    
+            if len(df) >= self.min_data_days:
+                closes[symbol] = df.set_index('timestamp')['close'].astype(float)
+
+        scores = rank_by_momentum(closes, date, self.momentum_period, len(closes))
+        logger.info("Momentum scored %d/%d symbols (%d load errors)",
+                    len(scores), len(self._all_symbols), failed)
+        return scores
+
     def _should_rebalance(self, date: pd.Timestamp) -> bool:
-        """
-        Check if universe should be rebalanced
-        
-        Rebalances on 1st trading day of each month
-        
-        Args:
-            date: Current date
-        
-        Returns:
-            True if should rebalance, False otherwise
-        """
-        current_month = date.strftime('%Y-%m')
-        
-        # No cached universe - need to rebalance
-        if self._cached_month is None:
-            return True
-        
-        # Different month - need to rebalance
-        if current_month != self._cached_month:
-            return True
-        
-        return False
-    
+        """Rebalance when nothing is cached or the month has changed"""
+        return self._cached_month is None or date.strftime('%Y-%m') != self._cached_month
+
     def get_universe(
         self,
         date: Optional[pd.Timestamp] = None,
@@ -245,167 +162,96 @@ class UniverseSelector:
     ) -> List[str]:
         """
         Get current universe of stocks to trade
-        
-        Returns cached universe if still in same month,
-        otherwise recalculates momentum and selects top N stocks.
-        
-        Args:
-            date: Date to get universe for (default: today)
-            force_refresh: Force recalculation even if cached (default: False)
-        
-        Returns:
-            List of top N symbols by momentum score
-        
-        Example:
-            >>> selector = UniverseSelector(db)
-            >>> universe = selector.get_universe(pd.Timestamp('2024-11-01'))
-            >>> print(f"Trading universe: {len(universe)} stocks")
-            >>> print(f"Top 5: {universe[:5]}")
+
+        Returns the cached universe within the same month, otherwise ranks by
+        momentum and selects the top N. If too few symbols have current data
+        the previous universe is kept rather than trading on a partial ranking.
         """
-        if date is None:
-            date = pd.Timestamp.now()
-        
-        # Check if we need to rebalance
+        date = pd.Timestamp(date) if date is not None else pd.Timestamp.now()
+
         if not force_refresh and not self._should_rebalance(date):
-            print(f"📦 Using cached universe ({self._cached_month})")
+            logger.info("Using cached universe (%s, %d symbols)", self._cached_month, len(self._cached_universe))
             return self._cached_universe
-        
-        # Rebalance: calculate new universe
+
         current_month = date.strftime('%Y-%m')
-        print(f"\n🔄 Rebalancing universe for {current_month}")
-        print(f"   Date: {date.strftime('%Y-%m-%d')}")
-        print(f"   Calculating {self.momentum_period}-day momentum for {len(self._all_symbols)} stocks...")
-        
-        # Calculate momentum scores
+        logger.info("Rebalancing universe for %s using data up to %s", current_month, date.date())
+
         momentum_df = self._calculate_momentum_scores(date)
-        
-        print(f"   Valid momentum scores: {len(momentum_df)}")
-        
-        # Handle empty results
-        if len(momentum_df) == 0:
-            print(f"   ❌ ERROR: No valid momentum scores calculated!")
-            print(f"   This usually means:")
-            print(f"      - Database needs more historical data (need {self.min_data_days}+ days)")
-            print(f"      - Run daily data update to fetch more history")
-            # Return empty universe - portfolio manager will handle this
-            self._cached_universe = []
-            self._cached_month = current_month
-            self._cached_scores = momentum_df
-            return []
-        
-        if len(momentum_df) < self.universe_size:
-            print(f"   ⚠️  WARNING: Only {len(momentum_df)} stocks with valid data")
-            print(f"   Using all available stocks (target: {self.universe_size})")
-        
-        # Select top N stocks
+
+        min_required = int(MIN_SCORED_FRACTION * len(self._all_symbols))
+        if len(momentum_df) < min_required:
+            logger.error(
+                "Only %d/%d symbols have current data (need %d) - keeping previous universe (%s). "
+                "Run the daily data update and retry.",
+                len(momentum_df), len(self._all_symbols), min_required, self._cached_month
+            )
+            return self._cached_universe or []
+
         selected = momentum_df.head(self.universe_size)
-        universe = selected['symbol'].tolist()
-        
-        # Cache results
-        self._cached_universe = universe
+        self._cached_universe = selected['symbol'].tolist()
         self._cached_month = current_month
         self._cached_scores = momentum_df
-        
-        # Print summary statistics
-        top_momentum = selected['momentum_score'].iloc[0] if len(selected) > 0 else 0
-        bottom_momentum = selected['momentum_score'].iloc[-1] if len(selected) > 0 else 0
-        avg_momentum = selected['momentum_score'].mean() if len(selected) > 0 else 0
-        
-        print(f"\n   ✅ Universe selected: {len(universe)} stocks")
-        print(f"   📊 Momentum range: {bottom_momentum:.2%} to {top_momentum:.2%}")
-        print(f"   📊 Average momentum: {avg_momentum:.2%}")
-        print(f"   🏆 Top 5 stocks: {universe[:5]}")
-        print(f"   📅 Valid until: {current_month} end\n")
-        
-        return universe
-    
+        self._save_cache()
+
+        logger.info("Universe selected: %d stocks, momentum %.2f%% to %.2f%%, top 5 %s",
+                    len(selected), selected['momentum_score'].iloc[-1] * 100,
+                    selected['momentum_score'].iloc[0] * 100, self._cached_universe[:5])
+        return self._cached_universe
+
     def get_momentum_scores(self) -> Optional[pd.DataFrame]:
-        """
-        Get cached momentum scores DataFrame
-        
-        Returns:
-            DataFrame with all momentum scores (if available)
-            Columns: [symbol, momentum_score, current_price, past_price]
-        """
+        """Cached momentum scores [symbol, momentum_score, current_price, past_price]"""
         return self._cached_scores
-    
+
     def get_universe_info(self) -> Dict:
-        """
-        Get information about current universe
-        
-        Returns:
-            Dictionary with universe statistics
-        """
-        if self._cached_universe is None:
-            return {
-                'size': 0,
-                'cache_month': None,
-                'top_5': [],
-                'momentum_range': None,
-                'symbols': []
-            }
-        
+        """Information about the current universe"""
+        empty = {
+            'size': 0,
+            'cache_month': self._cached_month,
+            'top_5': [],
+            'momentum_range': None,
+            'symbols': [],
+            'median_momentum': None,
+        }
+        if not self._cached_universe:
+            return empty
+
         scores_df = self._cached_scores
-        selected = scores_df[scores_df['symbol'].isin(self._cached_universe)]
-        
-        # Calculate momentum range
-        if len(selected) > 0:
-            momentum_range = (selected['momentum_score'].min(), selected['momentum_score'].max())
+        if scores_df is None or scores_df.empty or 'symbol' not in scores_df:
+            selected = pd.DataFrame(columns=['symbol', 'momentum_score'])
         else:
-            momentum_range = None
-        
+            selected = scores_df[scores_df['symbol'].isin(self._cached_universe)]
+
         return {
             'size': len(self._cached_universe),
             'cache_month': self._cached_month,
             'top_5': self._cached_universe[:5],
-            'momentum_range': momentum_range,
+            'momentum_range': ((selected['momentum_score'].min(), selected['momentum_score'].max())
+                               if len(selected) > 0 else None),
             'symbols': self._cached_universe,
-            'median_momentum': selected['momentum_score'].median() if len(selected) > 0 else None
+            'median_momentum': selected['momentum_score'].median() if len(selected) > 0 else None,
         }
-    
+
     def is_in_universe(self, symbol: str) -> bool:
-        """
-        Check if symbol is in current universe
-        
-        Args:
-            symbol: Stock symbol to check
-        
-        Returns:
-            True if symbol is in current universe, False otherwise
-        """
-        if self._cached_universe is None:
-            return False
-        
-        return symbol in self._cached_universe
-    
+        """True if symbol is in the current universe"""
+        return bool(self._cached_universe) and symbol in self._cached_universe
+
     def get_symbol_rank(self, symbol: str) -> Optional[int]:
-        """
-        Get rank of symbol in current universe (1-indexed)
-        
-        Args:
-            symbol: Stock symbol
-        
-        Returns:
-            Rank (1 = highest momentum) or None if not in universe
-        """
-        if self._cached_universe is None:
+        """Rank of symbol in current universe (1 = highest momentum) or None"""
+        if not self._cached_universe or symbol not in self._cached_universe:
             return None
-        
-        try:
-            rank = self._cached_universe.index(symbol) + 1
-            return rank
-        except ValueError:
-            return None
+        return self._cached_universe.index(symbol) + 1
 
 
 # Example usage and testing
 if __name__ == "__main__":
+    from logging_setup import setup_logging
+    setup_logging('universe_selector')
     print("="*80)
     print("UNIVERSE SELECTOR - TEST")
     print("="*80)
     
     # Initialize
-    db = Database(db_type='postgresql')
+    db = Database()
     selector = UniverseSelector(
         db=db,
         universe_size=100,
@@ -427,13 +273,13 @@ if __name__ == "__main__":
     # Get universe info
     info = selector.get_universe_info()
     
-    print(f"\n✅ Universe Size: {info['universe_size']} stocks")
-    print(f"📅 Month: {info['month']}")
-    print(f"📊 Average Momentum: {info['avg_momentum']:.2%}")
-    print(f"📊 Momentum Range: {info['bottom_momentum']:.2%} to {info['top_momentum']:.2%}")
+    print(f"\n✅ Universe Size: {info['size']} stocks")
+    print(f"📅 Month: {info['cache_month']}")
+    if info['momentum_range']:
+        print(f"📊 Momentum Range: {info['momentum_range'][0]:.2%} to {info['momentum_range'][1]:.2%}")
     
     print(f"\n🏆 Top 10 Stocks:")
-    for i, symbol in enumerate(info['top_5_stocks'] + universe[5:10], 1):
+    for i, symbol in enumerate(universe[:10], 1):
         rank = selector.get_symbol_rank(symbol)
         scores_df = selector.get_momentum_scores()
         if scores_df is not None:

@@ -21,6 +21,7 @@ import seaborn as sns
 from datetime import datetime
 from data.database import Database
 from backtest import run_backtest
+import config
 
 # Set style
 plt.style.use('seaborn-v0_8-darkgrid')
@@ -96,7 +97,7 @@ def plot_equity_curve(results, spy_benchmark, save_path):
                     alpha=0.15, color=color, label=f'{name}')
     
     ax1.set_ylabel('Portfolio Value ($)', fontsize=12, fontweight='bold')
-    ax1.set_title('20-Year Performance: VPVMA Strategy vs SPY Buy & Hold (2005-2025)', 
+    ax1.set_title('Performance: VPVMA Strategy vs SPY Buy & Hold (2005-present)', 
                   fontsize=14, fontweight='bold', pad=20)
     ax1.legend(loc='upper left', fontsize=10)
     ax1.grid(True, alpha=0.3)
@@ -293,7 +294,7 @@ def plot_annual_performance(results, spy_benchmark, save_path):
     ax.axhline(y=0, color='black', linewidth=1)
     ax.set_ylabel('Annual Return (%)', fontsize=12, fontweight='bold')
     ax.set_xlabel('Year', fontsize=12, fontweight='bold')
-    ax.set_title('Year-by-Year Performance Comparison (2005-2025)', 
+    ax.set_title('Year-by-Year Performance Comparison (2005-present)', 
                  fontsize=14, fontweight='bold', pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels(comparison['year'], rotation=45)
@@ -352,7 +353,7 @@ def plot_monthly_returns_heatmap(results, save_path):
     
     ax.set_xlabel('Month', fontsize=12, fontweight='bold')
     ax.set_ylabel('Year', fontsize=12, fontweight='bold')
-    ax.set_title('Monthly Returns Heatmap (2005-2025)', 
+    ax.set_title('Monthly Returns Heatmap (2005-present)', 
                  fontsize=14, fontweight='bold', pad=20)
     
     month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -463,7 +464,7 @@ def create_summary_dashboard(results, spy_benchmark, save_path):
     ax1.plot(spy_data['timestamp'], spy_data['equity'], 
              label='SPY Benchmark', linewidth=2, color='#A23B72', alpha=0.7)
     ax1.set_ylabel('Portfolio Value ($)', fontsize=12, fontweight='bold')
-    ax1.set_title('20-Year Performance Summary (2005-2025)', 
+    ax1.set_title('Performance Summary (2005-present)', 
                   fontsize=16, fontweight='bold', pad=20)
     ax1.legend(loc='upper left', fontsize=11)
     ax1.grid(True, alpha=0.3)
@@ -518,29 +519,23 @@ def generate_all_charts():
     print()
     
     # Initialize database
-    db = Database(db_type='postgresql')
+    db = Database()
     
     # Load universe
-    symbols_query = """
-        SELECT DISTINCT symbol 
-        FROM ohlcv_data 
-        WHERE symbol != 'SPY'
-        ORDER BY symbol
-    """
-    symbols_df = pd.read_sql(symbols_query, db.engine)
-    symbols = symbols_df['symbol'].tolist()
+    symbols = [s for s in db.list_symbols() if s != 'SPY']
+    end_date = db.latest_timestamp('SPY')
     
     # Run 20-year backtest
-    print("Running 20-year backtest (2005-2025)...")
-    print("This will take approximately 30-45 minutes...")
+    print(f"Running backtest 2005-01-01 to {end_date:%Y-%m-%d}...")
     print()
     
     results = run_backtest(
         db=db,
         symbols=symbols,
         start_date='2005-01-01',
-        end_date='2025-10-31',
-        initial_capital=100000
+        end_date=end_date,
+        initial_capital=100000,
+        universe_size=config.UNIVERSE_SIZE,
     )
     
     print()
@@ -551,7 +546,7 @@ def generate_all_charts():
     
     # Get SPY benchmark
     print("Loading SPY benchmark data...")
-    spy_benchmark = get_spy_benchmark(db, '2005-01-01', '2025-10-31')
+    spy_benchmark = get_spy_benchmark(db, '2005-01-01', end_date)
     print("✓ SPY benchmark loaded")
     print()
     

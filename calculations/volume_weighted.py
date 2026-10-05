@@ -5,7 +5,7 @@ Implements formulas 4.2-2 (SVWMA) and 4.2-3 (LVWMA)
 
 import numpy as np
 import pandas as pd
-from config import WINDOW_FAST, WINDOW_SLOW
+import config
 
 
 def calculate_vwma(typical_price: np.ndarray, volume: np.ndarray, window: int) -> np.ndarray:
@@ -62,7 +62,7 @@ def calculate_svwma(typical_price: np.ndarray, volume: np.ndarray) -> np.ndarray
     References:
         Paper Formula 4.2-2
     """
-    return calculate_vwma(typical_price, volume, WINDOW_FAST)
+    return calculate_vwma(typical_price, volume, config.WINDOW_FAST)
 
 
 def calculate_lvwma(typical_price: np.ndarray, volume: np.ndarray) -> np.ndarray:
@@ -81,4 +81,4 @@ def calculate_lvwma(typical_price: np.ndarray, volume: np.ndarray) -> np.ndarray
     References:
         Paper Formula 4.2-3
     """
-    return calculate_vwma(typical_price, volume, WINDOW_SLOW)
+    return calculate_vwma(typical_price, volume, config.WINDOW_SLOW)

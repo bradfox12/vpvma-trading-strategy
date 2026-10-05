@@ -11,7 +11,8 @@ Walk-forward process:
 5. Run backtest on that window
 6. Save results
 
-Then validate best configurations on 2024-2025 holdout.
+The configuration with the best MEAN Sharpe across all training windows is
+then evaluated once on the 2024-2025 holdout.
 
 Usage:
     python batch_tester.py --metrics all --sizes 50,100,150,200
@@ -98,7 +99,7 @@ class BatchTester:
     """
     
     def __init__(self):
-        self.db = Database(db_type='postgresql')
+        self.db = Database()
         self.results = []
     
     def run_single_backtest(
@@ -303,31 +304,39 @@ class BatchTester:
         print(f"\n✅ Results saved to: {output_path}")
         print(f"   Total configurations tested: {len(df)}")
     
-    def find_best_configs(self, top_n: int = 10) -> list:
+    def find_best_configs(self, top_n: int = 1) -> list:
         """
-        Find best configurations from training results
-        
+        Rank configurations on TRAINING results only.
+
+        A configuration (metric + universe size) is eligible only if it ran
+        successfully in every walk-forward window; eligible configurations are
+        ranked by mean Sharpe across windows (min Sharpe breaks ties). Picking
+        the best single-window result, or picking among several holdout results,
+        would overfit and make the holdout no longer out-of-sample.
+
         Args:
-            top_n: Number of top configs to return
-        
+            top_n: Number of configurations to return (default 1 = the pre-registered choice)
+
         Returns:
-            List of best configuration dicts
+            List of dicts with metric, universe_size, sharpe_mean, sharpe_min, cagr_mean,
+            win_rate_mean, windows
         """
         df = pd.DataFrame(self.results)
-        
-        # Filter successful runs
-        df = df[df['status'] == 'success']
-        
-        if len(df) == 0:
+        if df.empty:
             return []
-        
-        # Rank by Sharpe ratio
-        df = df.sort_values('sharpe', ascending=False)
-        
-        # Get top N unique metric+size combinations
-        best = df.drop_duplicates(subset=['metric', 'universe_size']).head(top_n)
-        
-        return best.to_dict('records')
+        df = df[df['status'] == 'success']
+        n_windows = len(WALK_FORWARD_WINDOWS)
+
+        summary = df.groupby(['metric', 'universe_size']).agg(
+            sharpe_mean=('sharpe', 'mean'),
+            sharpe_min=('sharpe', 'min'),
+            cagr_mean=('cagr', 'mean'),
+            win_rate_mean=('win_rate', 'mean'),
+            windows=('window', 'nunique'),
+        ).reset_index()
+        summary = summary[summary['windows'] == n_windows]
+        summary = summary.sort_values(['sharpe_mean', 'sharpe_min'], ascending=False)
+        return summary.head(top_n).to_dict('records')
 
 
 def main():
@@ -339,6 +348,9 @@ def main():
     parser.add_argument('--sizes', default='50,100,150,200', help='Universe sizes (comma-separated)')
     parser.add_argument('--validate', action='store_true', help='Run validation after training')
     parser.add_argument('--validate-only', action='store_true', help='Skip training, only run validation on existing results')
+    parser.add_argument('--validate-top', type=int, default=1,
+                        help='Holdout-test the top N training configs (default 1). N > 1 turns the '
+                             'holdout into another selection step - report it as such.')
     
     args = parser.parse_args()
     
@@ -372,21 +384,25 @@ def main():
         print(f"✅ Loaded {len(tester.results)} training results")
         
         # Find best configurations
-        best_configs = tester.find_best_configs(top_n=10)
+        best_configs = tester.find_best_configs(top_n=args.validate_top)
         
         print(f"\n{'='*70}")
-        print(f"TOP 10 CONFIGURATIONS (From Training)")
+        print(f"TOP CONFIGURATIONS (From Training)")
         print(f"{'='*70}")
         
         for i, config in enumerate(best_configs, 1):
             print(f"{i}. {config['metric']} (size={config['universe_size']})")
-            print(f"   Sharpe: {config['sharpe']:.3f}, CAGR: {config['cagr']:.2f}%, Win Rate: {config['win_rate']:.1f}%")
+            print(f"   Mean Sharpe: {config['sharpe_mean']:.3f} (worst window {config['sharpe_min']:.3f}), "
+                  f"mean CAGR: {config['cagr_mean']:.2f}%, mean win rate: {config['win_rate_mean']:.1f}%")
         
         # Run validation
         print(f"\n{'='*70}")
         print("RUNNING VALIDATION ON 2024-2025 HOLDOUT")
         print(f"{'='*70}")
         
+        if args.validate_top > 1:
+            print(f"\n⚠️  Validating {args.validate_top} configs: choosing among them by holdout "
+                  f"results is selection, not out-of-sample validation.")
         validation_results = tester.run_validation_test(best_configs)
         
         # Save validation results
@@ -425,15 +441,16 @@ def main():
     tester.save_results(str(training_results_path))
     
     # Find best configurations
-    best_configs = tester.find_best_configs(top_n=10)
+    best_configs = tester.find_best_configs(top_n=args.validate_top)
     
     print(f"\n{'='*70}")
-    print(f"TOP 10 CONFIGURATIONS (Training)")
+    print(f"TOP CONFIGURATIONS (Training)")
     print(f"{'='*70}")
     
     for i, config in enumerate(best_configs, 1):
         print(f"{i}. {config['metric']} (size={config['universe_size']})")
-        print(f"   Sharpe: {config['sharpe']:.3f}, CAGR: {config['cagr']:.2f}%, Win Rate: {config['win_rate']:.1f}%")
+        print(f"   Mean Sharpe: {config['sharpe_mean']:.3f} (worst window {config['sharpe_min']:.3f}), "
+              f"mean CAGR: {config['cagr_mean']:.2f}%, mean win rate: {config['win_rate_mean']:.1f}%")
     
     # Run validation if requested
     if args.validate and best_configs:

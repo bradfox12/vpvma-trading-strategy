@@ -1,238 +1,237 @@
 """
 Database connection and operations
-Supports PostgreSQL, MySQL, and SQLite
+
+Schema is defined with SQLAlchemy Core, so the same code runs on PostgreSQL
+(production) and SQLite (tests, or a lightweight local setup).
+
+Tables:
+- ohlcv_data: one fully adjusted daily bar per (symbol, session date at midnight)
+- corporate_actions: splits/dividends already applied to ohlcv_data, so an
+  adjustment can never be applied twice
 """
 
+import logging
+import os
+from typing import Dict, List, Optional
+
 import pandas as pd
-import numpy as np
-from typing import Optional, List, Tuple
-from datetime import datetime
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from contextlib import contextmanager
+from sqlalchemy import (
+    BigInteger, Column, DateTime, Float, Index, Integer, MetaData, String, Table,
+    UniqueConstraint, create_engine, func, select, text,
+)
+
 from secure_config import SecureConfig
+
+logger = logging.getLogger(__name__)
+
+metadata = MetaData()
+
+ohlcv_table = Table(
+    'ohlcv_data', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('symbol', String(20), nullable=False),
+    Column('timestamp', DateTime, nullable=False),
+    Column('open', Float, nullable=False),
+    Column('high', Float, nullable=False),
+    Column('low', Float, nullable=False),
+    Column('close', Float, nullable=False),
+    Column('volume', BigInteger, nullable=False),
+    Column('created_at', DateTime, server_default=func.current_timestamp()),
+    UniqueConstraint('symbol', 'timestamp'),
+    Index('idx_symbol_timestamp', 'symbol', 'timestamp'),
+)
+
+corporate_actions_table = Table(
+    'corporate_actions', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('symbol', String(20), nullable=False),
+    Column('ex_date', DateTime, nullable=False),
+    Column('kind', String(10), nullable=False),          # 'split' | 'dividend'
+    Column('price_factor', Float, nullable=False),       # multiplier for prices before ex_date
+    Column('details', String(200)),
+    Column('applied_at', DateTime, server_default=func.current_timestamp()),
+    UniqueConstraint('symbol', 'ex_date', 'kind'),
+)
+
+OHLCV_COLUMNS = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
 
 
 class Database:
-    """
-    Database handler for storing and retrieving OHLCV data
-    """
-    
-    def __init__(self, db_type: str = 'postgresql'):
+    """Storage and retrieval of daily OHLCV data"""
+
+    def __init__(self, db_type: Optional[str] = None, url=None):
         """
-        Initialize database connection
-        
         Args:
-            db_type: Database type ('postgresql', 'mysql', 'sqlite')
+            db_type: 'postgresql' (credentials from .env) or 'sqlite' (data/trading_data.db);
+                     default from DB_TYPE in .env, else 'postgresql'
+            url: Explicit SQLAlchemy URL; overrides db_type (used by tests)
         """
+        db_type = db_type or os.getenv('DB_TYPE', 'postgresql')
         self.db_type = db_type
-        self.connection_url = SecureConfig.get_database_url(db_type)
+        self.connection_url = url or SecureConfig.get_database_url(db_type)
         self.engine = create_engine(self.connection_url, echo=False)
-        self.SessionLocal = sessionmaker(bind=self.engine)
-    
-    @contextmanager
-    def get_session(self):
-        """Context manager for database sessions"""
-        session = self.SessionLocal()
-        try:
-            yield session
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            raise e
-        finally:
-            session.close()
-    
+
     def create_tables(self):
+        """Create missing tables (existing tables are left unchanged)"""
+        metadata.create_all(self.engine)
+
+    # ------------------------------------------------------------------ writes
+
+    def insert_ohlcv_data(self, symbol: str, df: pd.DataFrame, replace: bool = False):
         """
-        Create OHLCV table if it doesn't exist
-        """
-        create_table_sql = """
-        CREATE TABLE IF NOT EXISTS ohlcv_data (
-            id SERIAL PRIMARY KEY,
-            symbol VARCHAR(20) NOT NULL,
-            timestamp TIMESTAMP NOT NULL,
-            open DECIMAL(18, 8) NOT NULL,
-            high DECIMAL(18, 8) NOT NULL,
-            low DECIMAL(18, 8) NOT NULL,
-            close DECIMAL(18, 8) NOT NULL,
-            volume BIGINT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(symbol, timestamp)
-        );
-        
-        CREATE INDEX IF NOT EXISTS idx_symbol_timestamp 
-        ON ohlcv_data(symbol, timestamp);
-        """
-        
-        with self.engine.connect() as conn:
-            conn.execute(text(create_table_sql))
-            conn.commit()
-        
-        print("✓ Tables created successfully")
-    
-    def insert_ohlcv_data(
-        self,
-        symbol: str,
-        df: pd.DataFrame,
-        replace: bool = False
-    ):
-        """
-        Insert OHLCV data into database
-        
+        Insert bars for one symbol.
+
         Args:
-            symbol: Stock/crypto symbol
+            symbol: Ticker
             df: DataFrame with columns [timestamp, open, high, low, close, volume]
-            replace: If True, delete existing data for symbol first
+            replace: Delete the symbol's existing bars first (same transaction)
         """
-        # Validate DataFrame has required columns
-        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        if not all(col in df.columns for col in required_cols):
-            raise ValueError(f"DataFrame must contain columns: {required_cols}")
-        
-        # Add symbol column
-        df = df.copy()
-        df['symbol'] = symbol
-        
-        # Delete existing data if replace=True
-        if replace:
-            with self.engine.connect() as conn:
-                conn.execute(
-                    text("DELETE FROM ohlcv_data WHERE symbol = :symbol"),
-                    {"symbol": symbol}
+        if not set(OHLCV_COLUMNS).issubset(df.columns):
+            raise ValueError(f"DataFrame must contain columns: {OHLCV_COLUMNS}")
+        df = df[OHLCV_COLUMNS].copy()
+        df.insert(0, 'symbol', symbol)
+        self.insert_bars(df, replace_symbols=[symbol] if replace else None)
+        logger.info("Inserted %d records for %s", len(df), symbol)
+
+    def insert_bars(self, bars: pd.DataFrame, replace_symbols: Optional[List[str]] = None) -> int:
+        """
+        Insert bars for many symbols in one transaction, skipping (symbol, timestamp)
+        pairs that already exist.
+
+        Args:
+            bars: DataFrame [symbol, timestamp, open, high, low, close, volume]
+            replace_symbols: Symbols whose existing bars are deleted first
+
+        Returns:
+            Number of rows inserted
+        """
+        if bars.empty:
+            return 0
+        bars = bars[['symbol'] + OHLCV_COLUMNS].copy()
+        bars['timestamp'] = pd.to_datetime(bars['timestamp'])
+        bars['volume'] = bars['volume'].round().astype('int64')
+
+        with self.engine.begin() as conn:
+            if replace_symbols:
+                conn.execute(ohlcv_table.delete().where(ohlcv_table.c.symbol.in_(replace_symbols)))
+            else:
+                existing = pd.read_sql(
+                    select(ohlcv_table.c.symbol, ohlcv_table.c.timestamp).where(
+                        ohlcv_table.c.symbol.in_(bars['symbol'].unique().tolist()),
+                        ohlcv_table.c.timestamp.between(bars['timestamp'].min().to_pydatetime(),
+                                                        bars['timestamp'].max().to_pydatetime()),
+                    ),
+                    conn, parse_dates=['timestamp'],
                 )
-                conn.commit()
-        
-        # Insert data
-        df.to_sql(
-            'ohlcv_data',
-            self.engine,
-            if_exists='append',
-            index=False,
-            method='multi'
-        )
-        
-        print(f"✓ Inserted {len(df)} records for {symbol}")
-    
-    def get_ohlcv_data(
-        self,
-        symbol: str,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        limit: Optional[int] = None
-    ) -> pd.DataFrame:
+                if not existing.empty:
+                    keys = set(zip(existing['symbol'], existing['timestamp']))
+                    bars = bars[[k not in keys for k in zip(bars['symbol'], bars['timestamp'])]]
+            if bars.empty:
+                return 0
+            conn.execute(ohlcv_table.insert(), bars.to_dict('records'))
+        return len(bars)
+
+    def apply_adjustment(self, symbol: str, ex_date, kind: str, price_factor: float, details: str = '') -> bool:
         """
-        Retrieve OHLCV data from database
-    
+        Back-adjust a symbol's bars before ex_date for a split or dividend.
+
+        Prices are multiplied by price_factor and volume divided by it, matching
+        how the historical loader adjusts EOD data. Recorded in corporate_actions
+        in the same transaction; returns False if this action was already applied.
+        """
+        ex_date = pd.Timestamp(ex_date).to_pydatetime()
+        if not (0 < price_factor < 100):
+            raise ValueError(f"{symbol}: implausible {kind} factor {price_factor}")
+
+        with self.engine.begin() as conn:
+            already = conn.execute(
+                select(corporate_actions_table.c.id).where(
+                    corporate_actions_table.c.symbol == symbol,
+                    corporate_actions_table.c.ex_date == ex_date,
+                    corporate_actions_table.c.kind == kind,
+                )
+            ).first()
+            if already:
+                return False
+            t = ohlcv_table.c
+            conn.execute(
+                ohlcv_table.update()
+                .where(t.symbol == symbol, t.timestamp < ex_date)
+                .values(open=t.open * price_factor, high=t.high * price_factor,
+                        low=t.low * price_factor, close=t.close * price_factor,
+                        volume=func.round(t.volume / price_factor))
+            )
+            conn.execute(corporate_actions_table.insert().values(
+                symbol=symbol, ex_date=ex_date, kind=kind,
+                price_factor=price_factor, details=details[:200],
+            ))
+        logger.info("%s: applied %s on %s (price factor %.6f) %s",
+                    symbol, kind, ex_date.date(), price_factor, details)
+        return True
+
+    # ------------------------------------------------------------------- reads
+
+    def get_ohlcv_data(self, symbol: str, start_date=None, end_date=None, limit: Optional[int] = None) -> pd.DataFrame:
+        """
+        Bars for one symbol, sorted chronologically.
+
         Args:
-            symbol: Stock/crypto symbol
-            start_date: Optional start date filter
-            end_date: Optional end date filter
-            limit: Optional limit on number of records
-    
+            symbol: Ticker
+            start_date / end_date: Inclusive timestamp bounds (optional)
+            limit: Maximum rows (optional)
+
         Returns:
-            DataFrame with OHLCV data sorted chronologically
+            DataFrame [timestamp, open, high, low, close, volume] (floats)
         """
-        query = """
-        SELECT timestamp, open, high, low, close, volume
-        FROM ohlcv_data
-        WHERE symbol = %(symbol)s
-        """
-    
-        params = {"symbol": symbol}
-    
-        if start_date:
-            query += " AND timestamp >= %(start_date)s"
-            params["start_date"] = start_date
-    
-        if end_date:
-            query += " AND timestamp <= %(end_date)s"
-            params["end_date"] = end_date
-    
-        query += " ORDER BY timestamp ASC"
-    
+        t = ohlcv_table.c
+        query = select(t.timestamp, t.open, t.high, t.low, t.close, t.volume).where(t.symbol == symbol)
+        if start_date is not None:
+            query = query.where(t.timestamp >= pd.Timestamp(start_date).to_pydatetime())
+        if end_date is not None:
+            query = query.where(t.timestamp <= pd.Timestamp(end_date).to_pydatetime())
+        query = query.order_by(t.timestamp)
         if limit:
-            query += f" LIMIT {limit}"
-    
-        df = pd.read_sql(query, self.engine, params=params)
-    
+            query = query.limit(int(limit))
+
+        df = pd.read_sql(query, self.engine, parse_dates=['timestamp'])
+        for col in ('open', 'high', 'low', 'close', 'volume'):
+            df[col] = df[col].astype(float)
         return df
-    
-    def get_ohlcv_arrays(
-        self,
-        symbol: str,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Get OHLCV data as numpy arrays (ready for VPVMA calculation)
-        
-        Args:
-            symbol: Stock/crypto symbol
-            start_date: Optional start date filter
-            end_date: Optional end date filter
-        
-        Returns:
-            Tuple of (open, high, low, close, volume) as numpy arrays
-        """
-        df = self.get_ohlcv_data(symbol, start_date, end_date)
-        
-        if df.empty:
-            raise ValueError(f"No data found for symbol: {symbol}")
-        
-        return (
-            df['open'].to_numpy(),
-            df['high'].to_numpy(),
-            df['low'].to_numpy(),
-            df['close'].to_numpy(),
-            df['volume'].to_numpy()
-        )
-    
+
     def list_symbols(self) -> List[str]:
-        """
-        Get list of all symbols in database
-        
-        Returns:
-            List of unique symbols
-        """
-        query = "SELECT DISTINCT symbol FROM ohlcv_data ORDER BY symbol"
+        """All symbols in the database"""
+        query = select(ohlcv_table.c.symbol).distinct().order_by(ohlcv_table.c.symbol)
+        return pd.read_sql(query, self.engine)['symbol'].tolist()
+
+    def symbol_ranges(self) -> pd.DataFrame:
+        """Per-symbol [symbol, first, last, bars]"""
+        t = ohlcv_table.c
+        query = (select(t.symbol, func.min(t.timestamp).label('first'),
+                        func.max(t.timestamp).label('last'), func.count().label('bars'))
+                 .group_by(t.symbol).order_by(t.symbol))
+        return pd.read_sql(query, self.engine, parse_dates=['first', 'last'])
+
+    def latest_timestamp(self, symbol: str) -> Optional[pd.Timestamp]:
+        value = pd.read_sql(
+            select(func.max(ohlcv_table.c.timestamp).label('last')).where(ohlcv_table.c.symbol == symbol),
+            self.engine, parse_dates=['last'],
+        )['last'].iloc[0]
+        return None if pd.isna(value) else pd.Timestamp(value)
+
+    def last_closes_before(self, symbols: List[str], date) -> Dict[str, float]:
+        """Most recent close strictly before `date` for each symbol"""
+        t = ohlcv_table.c
+        date = pd.Timestamp(date).to_pydatetime()
+        latest = (select(t.symbol, func.max(t.timestamp).label('ts'))
+                  .where(t.symbol.in_(symbols), t.timestamp < date)
+                  .group_by(t.symbol).subquery())
+        query = select(t.symbol, t.close).join(
+            latest, (t.symbol == latest.c.symbol) & (t.timestamp == latest.c.ts))
         df = pd.read_sql(query, self.engine)
-        return df['symbol'].tolist()
-    
-    def get_data_info(self, symbol: str) -> dict:
-        """
-        Get information about data availability for a symbol
-    
-        Returns:
-            Dictionary with date range and record count
-        """
-        query = """
-        SELECT 
-            COUNT(*) as record_count,
-            MIN(timestamp) as start_date,
-            MAX(timestamp) as end_date
-        FROM ohlcv_data
-        WHERE symbol = %(symbol)s
-        """
-    
-        df = pd.read_sql(query, self.engine, params={"symbol": symbol})
-    
-        return {
-            'symbol': symbol,
-            'record_count': int(df['record_count'].iloc[0]),
-            'start_date': df['start_date'].iloc[0],
-            'end_date': df['end_date'].iloc[0]
-        }
+        return dict(zip(df['symbol'], df['close'].astype(float)))
 
 
-# Example usage
 if __name__ == "__main__":
-    # Initialize database
-    db = Database(db_type='postgresql')
-    
-    # Create tables
+    db = Database()
     db.create_tables()
-    
-    # List available symbols
-    symbols = db.list_symbols()
-    print(f"Available symbols: {symbols}")
+    print(db.symbol_ranges().to_string())

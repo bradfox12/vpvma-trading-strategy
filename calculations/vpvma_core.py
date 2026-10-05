@@ -5,7 +5,7 @@ Implements formulas 4.2-7 (VPVMA) and 4.2-8 (VPVMAS)
 
 import numpy as np
 import pandas as pd
-from config import WINDOW_SIGN
+import config
 
 
 def calculate_vpvma(esvmap: np.ndarray, elvmap: np.ndarray) -> np.ndarray:
@@ -51,6 +51,6 @@ def calculate_vpvmas(vpvma: np.ndarray) -> np.ndarray:
     vpvma_series = pd.Series(vpvma)
     
     # Calculate Simple Moving Average (NOT EMA)
-    vpvmas = vpvma_series.rolling(window=WINDOW_SIGN, min_periods=WINDOW_SIGN).mean()
+    vpvmas = vpvma_series.rolling(window=config.WINDOW_SIGN, min_periods=config.WINDOW_SIGN).mean()
     
     return vpvmas.to_numpy()

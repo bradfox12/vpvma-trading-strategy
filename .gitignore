@@ -60,3 +60,8 @@ vpvma_*_trending_*.csv
 vpvma_high_quality_*.csv
 *_backtest_*_trades.csv
 vpvma_*_comprehensive.csv
+# Runtime outputs (portfolio_state.json is the trading ledger - keep it tracked/backed up)
+logs/
+*.tmp
+universe_cache.json
+daily_orders*.html

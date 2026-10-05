@@ -280,7 +280,7 @@ def main():
     print(f"\nStarted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Initialize database
-    db = Database(db_type='postgresql')
+    db = Database()
     
     # Get symbol universe
     all_symbols = get_symbol_universe(db)

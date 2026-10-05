@@ -1,452 +1,454 @@
 """
 VPVMA Backtest with FastExit+SPY200 Protection
-CORRECTED: Now uses Phase 3 validated sell logic with proper crossover detection
+
+Uses the same decision engine as live trading (strategy.plan_day), so entry,
+exit, universe and replacement rules cannot drift between the two.
+
+Execution model:
+- Signals are computed at the close of day t
+- Orders fill at the OPEN of the symbol's next bar (no same-close fills)
+- Slippage and commission from config
+- Held symbols whose data stops (delisting, ticker change) are force-sold at
+  their last close after DELIST_GRACE_DAYS trading days without a bar
+
+Indicators are computed once per symbol over the full loaded history; values at
+day t only use bars up to t, so there is no look-ahead.
 
 Run from project directory:
-    python backtest_corrected.py
+    python backtest.py
 """
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-import pandas as pd
+import logging
+from datetime import timedelta
+from typing import Dict, Optional
+
 import numpy as np
-from datetime import datetime, timedelta
-from data.database import Database
-from main import calculate_vpvma_indicator
+import pandas as pd
+
 import config
-import warnings
-warnings.filterwarnings('ignore')
+from protection.market_regime import bear_regime_series
+from strategy import (
+    compute_indicator_frame,
+    fill_price,
+    plan_day,
+    rank_by_momentum,
+    shares_for,
+    SymbolSignal,
+)
+
+logger = logging.getLogger(__name__)
+
+DELIST_GRACE_DAYS = 5
+PANEL_COLUMNS = ['open', 'close', 'vpvma', 'vpvmas', 'vpvma_prev', 'vpvmas_prev', 'buy_signal', 'strength']
 
 
 class ProtectedPortfolio:
-    """
-    Full-universe VPVMA portfolio with FastExit+SPY200 protection
-    
-    Strategy:
-    - Scan all 183 stocks daily for VPVMA signals
-    - Rank buy signals by strength
-    - Take top N strongest signals (max_positions limit)
-    - Exit 2x faster when SPY < 200MA
-    """
-    
-    def __init__(self, initial_capital=100000, max_positions=20, commission=1, slippage_bps=2):
+    """Cash, positions and trade/equity records for one backtest"""
+
+    def __init__(self, initial_capital=100000, max_positions=None):
         self.initial_capital = initial_capital
-        self.cash = initial_capital
-        self.max_positions = max_positions
-        self.commission = commission
-        self.slippage_bps = slippage_bps
-        
+        self.cash = float(initial_capital)
+        self.max_positions = max_positions or config.MAX_POSITIONS
+
         self.positions = {}
         self.history = []
         self.trades = []
-        
-        # Protection state
+
         self.protection_active = False
         self.protection_days = 0
         self.total_days = 0
-        
-        # Tracking
+
         self.total_buy_signals = 0
         self.missed_signals = 0
-        
-        # Sell tracking
         self.fastexit_sells = 0
         self.normal_sells = 0
-    
-    def update_spy_regime(self, spy_data: pd.DataFrame, current_date: pd.Timestamp):
-        """Update bear market regime using SPY 200MA"""
-        spy_subset = spy_data[spy_data['timestamp'] <= current_date].tail(250)
-        
-        if len(spy_subset) < 200:
-            self.protection_active = False
-            return
-        
-        spy_subset = spy_subset.copy()
-        spy_subset['ma_200'] = spy_subset['close'].rolling(window=200).mean()
-        
-        latest = spy_subset.iloc[-1]
-        self.protection_active = latest['close'] < latest['ma_200']
-        
-        self.total_days += 1
-        if self.protection_active:
-            self.protection_days += 1
-    
-    def get_sell_bandwidth(self):
-        """Get adaptive sell bandwidth based on regime"""
-        if self.protection_active:
-            return config.BEAR_SELL_BANDWIDTH  # FastExit: uses dynamic bear bandwidth from config
-        else:
-            return config.SELL_BANDWIDTH  # Normal: uses dynamic value from config
-    
-    def get_equity(self, current_prices):
-        """Calculate total portfolio equity"""
-        position_value = sum(
-            pos['shares'] * current_prices.get(symbol, pos['entry_price'])
-            for symbol, pos in self.positions.items()
-        )
-        return self.cash + position_value
-    
-    def execute_buy(self, symbol, price, date, strength):
-        """Execute buy order"""
-        if symbol in self.positions:
-            return
-        
-        equity = self.get_equity({symbol: price})
-        position_size = equity * 0.05  # 5% per position
-        
-        slippage = price * (self.slippage_bps / 10000)
-        fill_price = price + slippage
-        
-        shares = int((position_size - self.commission) / fill_price)
+
+    def equity(self, marks: Dict[str, float]) -> float:
+        return self.cash + sum(pos['shares'] * marks.get(sym, pos['entry_price'])
+                               for sym, pos in self.positions.items())
+
+    def buy(self, symbol, price, date, equity, strength=0.0):
+        if symbol in self.positions or len(self.positions) >= self.max_positions:
+            return False
+        px = fill_price(price, 'BUY')
+        shares = shares_for(equity, px, self.cash)
         if shares <= 0:
-            return
-        
-        cost = shares * fill_price + self.commission
-        if cost > self.cash:
-            return
-        
+            return False
+        cost = shares * px + config.COMMISSION
         self.cash -= cost
         self.positions[symbol] = {
             'shares': shares,
-            'entry_price': fill_price,
+            'entry_price': px,
+            'cost_basis': cost,
             'entry_date': date,
-            'strength': strength
+            'strength': strength,
         }
-        
         self.trades.append({
-            'date': date,
-            'symbol': symbol,
-            'action': 'BUY',
-            'shares': shares,
-            'price': fill_price,
-            'commission': self.commission,
-            'protection_active': self.protection_active
-        })
-    
-    def execute_sell(self, symbol, price, date, fast_exit=False):
-        """Execute sell order"""
-        if symbol not in self.positions:
-            return
-        
-        pos = self.positions[symbol]
-        slippage = price * (self.slippage_bps / 10000)
-        fill_price = price - slippage
-        
-        proceeds = pos['shares'] * fill_price - self.commission
-        self.cash += proceeds
-        
-        pnl = proceeds - (pos['shares'] * pos['entry_price'])
-        hold_days = (date - pos['entry_date']).days
-        
-        self.trades.append({
-            'date': date,
-            'symbol': symbol,
-            'action': 'SELL',
-            'shares': pos['shares'],
-            'price': fill_price,
-            'commission': self.commission,
-            'pnl': pnl,
-            'hold_days': hold_days,
+            'date': date, 'symbol': symbol, 'action': 'BUY', 'shares': shares,
+            'price': px, 'commission': config.COMMISSION,
             'protection_active': self.protection_active,
-            'fast_exit': fast_exit
         })
-        
+        return True
+
+    def sell(self, symbol, price, date, reason='Signal', fast_exit=False):
+        pos = self.positions.pop(symbol, None)
+        if pos is None:
+            return False
+        px = fill_price(price, 'SELL')
+        proceeds = pos['shares'] * px - config.COMMISSION
+        self.cash += proceeds
+        self.trades.append({
+            'date': date, 'symbol': symbol, 'action': 'SELL', 'shares': pos['shares'],
+            'price': px, 'commission': config.COMMISSION,
+            'pnl': proceeds - pos['cost_basis'],
+            'hold_days': (date - pos['entry_date']).days,
+            'protection_active': self.protection_active,
+            'fast_exit': fast_exit,
+            'exit_reason': reason,
+        })
         if fast_exit:
             self.fastexit_sells += 1
         else:
             self.normal_sells += 1
-        
-        del self.positions[symbol]
-    
-    def record_snapshot(self, date, current_prices):
-        """Record daily portfolio snapshot"""
-        equity = self.get_equity(current_prices)
-        
-        self.history.append({
+        return True
+
+
+def build_panels(frames: Dict[str, pd.DataFrame], trading_days: pd.DatetimeIndex) -> Dict[str, pd.DataFrame]:
+    """Align every symbol's indicator frame to the trading calendar: column -> (day × symbol)"""
+    indicator = {sym: compute_indicator_frame(df) for sym, df in frames.items() if len(df) > 0}
+    panels = {}
+    for col in PANEL_COLUMNS:
+        panels[col] = pd.DataFrame(
+            {sym: f[col].reindex(trading_days) for sym, f in indicator.items()},
+            index=trading_days,
+        )
+    panels['last_bar'] = pd.Series({sym: f.index.max() for sym, f in indicator.items()})
+    panels['closes'] = {sym: f['close'] for sym, f in indicator.items()}
+    return panels
+
+
+def run_backtest_on_frames(
+    frames: Dict[str, pd.DataFrame],
+    spy_data: pd.DataFrame,
+    start_date,
+    end_date,
+    initial_capital: float = 100000,
+    universe_size: Optional[int] = None,
+    momentum_period: Optional[int] = None,
+) -> dict:
+    """
+    Backtest on in-memory OHLCV frames (no database access).
+
+    Args:
+        frames: symbol -> DataFrame[timestamp, open, high, low, close, volume]
+                (include history before start_date for indicator warmup)
+        spy_data: SPY OHLCV; defines the trading calendar and the regime
+        start_date, end_date: Evaluation period
+        initial_capital: Starting cash
+        universe_size: Top-N momentum universe re-selected monthly; None trades every symbol
+        momentum_period: Momentum lookback in bars (default config.MOMENTUM_PERIOD)
+    """
+    start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    momentum_period = momentum_period or config.MOMENTUM_PERIOD
+
+    spy_data = spy_data.sort_values('timestamp').reset_index(drop=True)
+    regime = bear_regime_series(spy_data)
+    trading_days = pd.DatetimeIndex(spy_data['timestamp'])
+    trading_days = trading_days[(trading_days >= start) & (trading_days <= end)]
+    if len(trading_days) == 0:
+        raise ValueError(f"No SPY trading days between {start.date()} and {end.date()}")
+
+    logger.info("Computing indicators for %d symbols...", len(frames))
+    panels = build_panels(frames, trading_days)
+    symbols = list(panels['open'].columns)
+
+    portfolio = ProtectedPortfolio(initial_capital=initial_capital)
+    marks: Dict[str, float] = {}
+    pending = None
+    pending_strength = {}
+    universe = None
+    universe_month = None
+    universe_history = []
+    day_pos = {d: i for i, d in enumerate(trading_days)}
+
+    total_days = len(trading_days)
+    step = max(1, total_days // 20)
+
+    for i, date in enumerate(trading_days):
+        if i % step == 0:
+            logger.info("Progress: %d%% (%s)", int(i / total_days * 100), date.date())
+
+        opens = panels['open'].loc[date]
+        closes = panels['close'].loc[date]
+
+        # 1. Fill yesterday's orders at today's open
+        unfilled_sells = []
+        if pending is not None:
+            exits = pending.sells + [{'symbol': r['sell_symbol'], 'reason': 'Replacement', 'fast_exit': False}
+                                     for r in pending.replacements]
+            for order in exits:
+                sym = order['symbol']
+                px = opens.get(sym)
+                if px is None or np.isnan(px):
+                    unfilled_sells.append(order)  # no bar today - retry at the next bar
+                    continue
+                portfolio.sell(sym, px, date, order['reason'], order['fast_exit'])
+            equity = portfolio.equity(marks)
+            buy_list = [r['buy_symbol'] for r in pending.replacements] + pending.buys
+            for sym in buy_list:
+                px = opens.get(sym)
+                if px is None or np.isnan(px):
+                    portfolio.missed_signals += 1
+                    continue
+                portfolio.buy(sym, px, date, equity, pending_strength.get(sym, 0.0))
+
+        # 2. Mark to market
+        for sym, px in closes.dropna().items():
+            marks[sym] = float(px)
+
+        # 3. Force-exit positions whose data has stopped
+        for sym in list(portfolio.positions):
+            last_bar = panels['last_bar'].get(sym)
+            if last_bar is not None and last_bar < date:
+                bars_since = i - day_pos.get(last_bar, i - DELIST_GRACE_DAYS - 1)
+                if last_bar not in day_pos or bars_since > DELIST_GRACE_DAYS:
+                    logger.warning("%s: no data since %s - closing at last close %.2f",
+                                   sym, last_bar.date(), marks.get(sym, np.nan))
+                    portfolio.sell(sym, marks.get(sym, portfolio.positions[sym]['entry_price']),
+                                   date, 'No Data')
+
+        # 4. Regime
+        bearish = bool(regime.asof(date)) if len(regime) else False
+        portfolio.protection_active = bearish and config.ENABLE_BEAR_PROTECTION
+        portfolio.total_days += 1
+        portfolio.protection_days += int(portfolio.protection_active)
+
+        # 5. Monthly momentum universe
+        if universe_size is not None and date.strftime('%Y-%m') != universe_month:
+            ranked = rank_by_momentum(panels['closes'], date, momentum_period, universe_size)
+            universe = ranked['symbol'].tolist()
+            universe_month = date.strftime('%Y-%m')
+            universe_history.append({'date': date, 'symbols': universe})
+
+        # 6. Today's signals
+        signals = {}
+        valid = panels['vpvmas'].loc[date].notna() & panels['vpvma'].loc[date].notna()
+        for sym in valid[valid].index:
+            signals[sym] = SymbolSignal(
+                symbol=sym,
+                price=float(closes[sym]),
+                vpvma=float(panels['vpvma'].at[date, sym]),
+                vpvmas=float(panels['vpvmas'].at[date, sym]),
+                vpvma_prev=float(panels['vpvma_prev'].at[date, sym]),
+                vpvmas_prev=float(panels['vpvmas_prev'].at[date, sym]),
+                buy_signal=bool(panels['buy_signal'].at[date, sym]),
+                strength=float(panels['strength'].at[date, sym]),
+            )
+        portfolio.total_buy_signals += sum(
+            1 for s in signals.values()
+            if s.buy_signal and (universe is None or s.symbol in universe)
+        )
+
+        # 7. Decide tomorrow's orders
+        pending = plan_day(portfolio.positions, signals, portfolio.protection_active, universe)
+        planned = {o['symbol'] for o in pending.sells} | {r['sell_symbol'] for r in pending.replacements}
+        pending.sells += [o for o in unfilled_sells
+                          if o['symbol'] in portfolio.positions and o['symbol'] not in planned]
+        pending_strength = {s: signals[s].strength for s in pending.buys}
+        pending_strength.update({r['buy_symbol']: signals[r['buy_symbol']].strength
+                                 for r in pending.replacements})
+        portfolio.missed_signals += pending.missed_signals
+
+        portfolio.history.append({
             'date': date,
-            'equity': equity,
-            'cash': self.cash,
-            'num_positions': len(self.positions),
-            'protection_active': self.protection_active
+            'equity': portfolio.equity(marks),
+            'cash': portfolio.cash,
+            'num_positions': len(portfolio.positions),
+            'protection_active': portfolio.protection_active,
         })
 
-
-def run_backtest(
-    db: Database,
-    symbols: list,
-    start_date: str,
-    end_date: str,
-    initial_capital: int = 100000
-):
-    """
-    Run full-universe VPVMA backtest with FastExit+SPY200 protection
-    """
-    
-    print("=" * 80)
-    print("VPVMA BACKTEST WITH FASTEXIT+SPY200 PROTECTION")
-    print("=" * 80)
-    print(f"Started: {datetime.now().strftime('%H:%M:%S')}")
-    print("=" * 80)
-    print(f"Period: {start_date} to {end_date}")
-    print(f"Capital: ${initial_capital:,}")
-    print(f"Protection: ✅ ENABLED (exits 2x faster in bear markets)")
-    print("=" * 80)
-    
-    portfolio = ProtectedPortfolio(initial_capital=initial_capital, max_positions=20)
-    
-    start = pd.Timestamp(start_date)
-    end = pd.Timestamp(end_date)
-    
-    print(f"📊 Universe: {len(symbols)} stocks")
-    
-    # Pre-calculate SPY regime for entire period
-    print("🛡️ Pre-calculating SPY bear market regime...")
-    spy_data = db.get_ohlcv_data('SPY', start_date=start - timedelta(days=365), end_date=end)
-    print(f"   ✓ Loaded {len(spy_data)} days of SPY data")
-    
-    # Get all trading days from SPY
-    trading_days = spy_data[
-        (spy_data['timestamp'] >= start) & 
-        (spy_data['timestamp'] <= end)
-    ]['timestamp'].tolist()
-    
-    total_days = len(trading_days)
-    print(f"Processing {total_days} trading days...")
-    
-    # Main backtest loop - DATE FIRST
-    for day_idx, date in enumerate(trading_days):
-        if day_idx % (total_days // 20) == 0:
-            pct = int((day_idx / total_days) * 100)
-            print(f"Progress: {pct}%", end=' ', flush=True)
-        
-        # Update protection regime
-        portfolio.update_spy_regime(spy_data, date)
-        
-        current_prices = {}
-        buy_signals_today = []
-        
-        # Scan full universe for signals
-        for symbol in symbols:
-            try:
-                # Get data up to current date (no look-ahead bias)
-                df = db.get_ohlcv_data(
-                    symbol,
-                    start_date=start - timedelta(days=365),
-                    end_date=date
-                )
-                
-                if len(df) < 50:
-                    continue
-                
-                # Calculate VPVMA indicator
-                result = calculate_vpvma_indicator(
-                    high=df['high'].values,
-                    low=df['low'].values,
-                    close=df['close'].values,
-                    open_price=df['open'].values,
-                    volume=df['volume'].values
-                )
-                
-                if len(result['vpvma']) == 0 or np.isnan(result['vpvma'][-1]):
-                    continue
-                
-                current_price = df['close'].iloc[-1]
-                current_prices[symbol] = current_price
-                
-                # Get signal values
-                buy_signal = result['buy_signals'][-1]
-                vpvma_val = result['vpvma'][-1]
-                vpvmas_val = result['vpvmas'][-1]
-                
-                # Store buy signals for ranking
-                if buy_signal:
-                    buy_threshold = (1 + config.BUY_BANDWIDTH) * vpvmas_val
-                    strength = (vpvma_val - buy_threshold) / buy_threshold if buy_threshold != 0 else 0
-                    
-                    buy_signals_today.append({
-                        'symbol': symbol,
-                        'price': current_price,
-                        'strength': strength
-                    })
-                    portfolio.total_buy_signals += 1
-                
-                # Check sells for existing positions - CORRECTED PHASE 3 LOGIC
-                if symbol in portfolio.positions:
-                    # Get adaptive sell bandwidth based on regime
-                    sell_bandwidth = portfolio.get_sell_bandwidth()
-                    
-                    # Calculate adaptive sell threshold
-                    sell_threshold = (1 - sell_bandwidth * 2) * vpvmas_val
-                    
-                    # Check crossover condition (was above signal line previously)
-                    if len(result['vpvma']) >= 2:
-                        vpvma_prev = result['vpvma'][-2]
-                        vpvmas_prev = result['vpvmas'][-2]
-                        was_above = vpvma_prev >= vpvmas_prev
-                    else:
-                        was_above = False
-                    
-                    # PHASE 3 LOGIC: Sell if (was above) AND (now below adaptive threshold)
-                    # This combines crossover detection with adaptive threshold
-                    should_sell = was_above and (vpvma_val < sell_threshold)
-                    
-                    if should_sell:
-                        portfolio.execute_sell(
-                            symbol, 
-                            current_price, 
-                            date,
-                            fast_exit=portfolio.protection_active
-                        )
-                
-            except Exception as e:
-                continue
-        
-        # Execute buys (take strongest signals first, up to max_positions)
-        if buy_signals_today:
-            buy_signals_today.sort(key=lambda x: x['strength'], reverse=True)
-            
-            available_slots = portfolio.max_positions - len(portfolio.positions)
-            signals_to_execute = buy_signals_today[:available_slots]
-            
-            for signal in signals_to_execute:
-                portfolio.execute_buy(
-                    symbol=signal['symbol'],
-                    price=signal['price'],
-                    date=date,
-                    strength=signal['strength']
-                )
-            
-            portfolio.missed_signals += max(0, len(buy_signals_today) - available_slots)
-        
-        # Record daily snapshot
-        portfolio.record_snapshot(date, current_prices)
-    
-    print("✓")
-    
-    # Calculate metrics
     df_history = pd.DataFrame(portfolio.history)
-    df_trades = pd.DataFrame(portfolio.trades)
-    
-    total_return = (df_history['equity'].iloc[-1] / initial_capital - 1) * 100
-    days_elapsed = (df_history['date'].iloc[-1] - df_history['date'].iloc[0]).days
-    years = days_elapsed / 365.25
-    cagr = ((df_history['equity'].iloc[-1] / initial_capital) ** (1/years) - 1) * 100
-    
-    # Calculate drawdown
-    df_history['cummax'] = df_history['equity'].cummax()
-    df_history['drawdown'] = (df_history['equity'] / df_history['cummax'] - 1) * 100
-    max_dd = df_history['drawdown'].min()
-    
-    # Calculate returns
-    df_history['returns'] = df_history['equity'].pct_change()
-    annual_vol = df_history['returns'].std() * np.sqrt(252) * 100
-    
-    # Sharpe ratio
-    mean_return = df_history['returns'].mean()
-    std_return = df_history['returns'].std()
-    sharpe = (mean_return / std_return * np.sqrt(252)) if std_return > 0 else 0
-    
-    # Sortino ratio
-    downside_returns = df_history['returns'][df_history['returns'] < 0]
-    downside_std = downside_returns.std()
-    sortino = (mean_return / downside_std * np.sqrt(252)) if downside_std > 0 else 0
-    
-    # Omega ratio
-    threshold = 0
-    gains = df_history['returns'][df_history['returns'] > threshold].sum()
-    losses = abs(df_history['returns'][df_history['returns'] < threshold].sum())
-    omega = gains / losses if losses > 0 else 0
-    
-    # Calmar ratio
-    calmar = cagr / abs(max_dd) if max_dd != 0 else 0
-    
-    # Trade analysis
-    sell_trades = df_trades[df_trades['action'] == 'SELL']
-    winning_trades = sell_trades[sell_trades['pnl'] > 0]
-    losing_trades = sell_trades[sell_trades['pnl'] <= 0]
-    
-    win_rate = len(winning_trades) / len(sell_trades) * 100 if len(sell_trades) > 0 else 0
-    avg_win = winning_trades['pnl'].mean() if len(winning_trades) > 0 else 0
-    avg_loss = losing_trades['pnl'].mean() if len(losing_trades) > 0 else 0
-    avg_hold = sell_trades['hold_days'].mean() if 'hold_days' in sell_trades.columns else 0
-    
-    # Print results
-    print("=" * 80)
-    print("BACKTEST RESULTS")
-    print("=" * 80)
-    print("💰 RETURNS:")
-    print(f"  Total Return: +{total_return:.2f}%")
-    print(f"  CAGR: {cagr:.2f}%")
-    print(f"  Final Equity: ${df_history['equity'].iloc[-1]:,.0f}")
-    
-    print("⚠️  RISK METRICS:")
-    print(f"  Max Drawdown: {max_dd:.2f}%")
-    print(f"  Sharpe Ratio: {sharpe:.2f}")
-    print(f"  Sortino Ratio: {sortino:.2f}")
-    print(f"  Omega Ratio: {omega:.2f}")
-    print(f"  Calmar Ratio: {calmar:.2f}")
-    print(f"  Annual Volatility: {annual_vol:.2f}%")
-    
-    print("💼 TRADING:")
-    print(f"  Total Trades: {len(df_trades)}")
-    print(f"  Win Rate: {win_rate:.1f}%")
-    print(f"  Average Win: ${avg_win:.0f}")
-    print(f"  Average Loss: ${avg_loss:.0f}")
-    print(f"  Avg Hold: {avg_hold:.0f} days")
-    print(f"  Unique Stocks: {df_trades['symbol'].nunique()}")
-    
-    print("🛡️ PROTECTION ACTIVATION:")
-    print(f"  Total days: {portfolio.total_days}")
-    print(f"  Protection ON: {portfolio.protection_days} ({portfolio.protection_days/portfolio.total_days*100:.1f}%)")
-    print(f"  Normal regime: {portfolio.total_days - portfolio.protection_days} ({(portfolio.total_days-portfolio.protection_days)/portfolio.total_days*100:.1f}%)")
-    print(f"  FastExit sells: {portfolio.fastexit_sells}")
-    print(f"  Normal sells: {portfolio.normal_sells}")
-    
-    print("=" * 80)
-    print("BACKTEST COMPLETE ✅")
-    print("=" * 80)
-    print(f"Finished: {datetime.now().strftime('%H:%M:%S')}")
-    print("💡 EXPECTED (2024-2025 Holdout):")
-    print("   Sharpe: ~1.13 (vs 0.98 baseline)")
-    print("   CAGR: ~14.8% (vs 12.7% baseline)")
-    print("   Protection: ~8-9% of days")
-    print("=" * 80)
-    
+    df_trades = pd.DataFrame(portfolio.trades, columns=[
+        'date', 'symbol', 'action', 'shares', 'price', 'commission', 'pnl',
+        'hold_days', 'protection_active', 'fast_exit', 'exit_reason'])
+    metrics = compute_metrics(df_history, df_trades, initial_capital)
+
     return {
         'history': df_history,
         'trades': df_trades,
         'portfolio': portfolio,
-        'metrics': {
-            'total_return': total_return,
-            'cagr': cagr,
-            'sharpe': sharpe,
-            'sortino': sortino,
-            'max_dd': max_dd,
-            'win_rate': win_rate
-        }
+        'metrics': metrics,
+        'universe_history': universe_history,
     }
 
 
-if __name__ == "__main__":
-    db = Database(db_type='postgresql')
-    
-    # Load universe
-    symbols_query = """
-        SELECT DISTINCT symbol 
-        FROM ohlcv_data 
-        WHERE symbol != 'SPY'
-        ORDER BY symbol
+def compute_metrics(df_history: pd.DataFrame, df_trades: pd.DataFrame, initial_capital: float) -> dict:
+    """Return/risk/trade statistics; adds cummax, drawdown and returns columns to df_history"""
+    final_equity = df_history['equity'].iloc[-1]
+    total_return = (final_equity / initial_capital - 1) * 100
+    years = (df_history['date'].iloc[-1] - df_history['date'].iloc[0]).days / 365.25
+    cagr = ((final_equity / initial_capital) ** (1 / years) - 1) * 100 if years > 0 else np.nan
+
+    df_history['cummax'] = df_history['equity'].cummax()
+    df_history['drawdown'] = (df_history['equity'] / df_history['cummax'] - 1) * 100
+    max_dd = df_history['drawdown'].min()
+
+    returns = df_history['equity'].pct_change()
+    df_history['returns'] = returns
+    r = returns.dropna()
+    std = r.std()
+    annual_vol = std * np.sqrt(252) * 100 if len(r) > 1 else np.nan
+    sharpe = r.mean() / std * np.sqrt(252) if std and std > 0 else np.nan
+    downside_dev = np.sqrt((np.minimum(r, 0) ** 2).mean()) if len(r) else 0
+    sortino = r.mean() / downside_dev * np.sqrt(252) if downside_dev > 0 else np.nan
+    losses = -r[r < 0].sum()
+    omega = r[r > 0].sum() / losses if losses > 0 else np.nan
+    calmar = cagr / abs(max_dd) if max_dd < 0 else np.nan
+
+    sells = df_trades[df_trades['action'] == 'SELL']
+    wins = sells[sells['pnl'] > 0]
+    loss_trades = sells[sells['pnl'] <= 0]
+    gross_loss = -loss_trades['pnl'].sum()
+
+    return {
+        'total_return': total_return,
+        'cagr': cagr,
+        'final_equity': final_equity,
+        'sharpe': sharpe,
+        'sortino': sortino,
+        'omega': omega,
+        'calmar': calmar,
+        'max_dd': max_dd,
+        'annual_vol': annual_vol,
+        'num_trades': len(df_trades),
+        'num_round_trips': len(sells),
+        'win_rate': len(wins) / len(sells) * 100 if len(sells) else np.nan,
+        'avg_win': wins['pnl'].mean() if len(wins) else np.nan,
+        'avg_loss': loss_trades['pnl'].mean() if len(loss_trades) else np.nan,
+        'profit_factor': wins['pnl'].sum() / gross_loss if gross_loss > 0 else np.nan,
+        'avg_hold_days': sells['hold_days'].mean() if len(sells) else np.nan,
+        'unique_symbols': df_trades['symbol'].nunique(),
+    }
+
+
+def load_frames(db, symbols, start_date, end_date) -> Dict[str, pd.DataFrame]:
+    """Load OHLCV for every symbol once, with indicator warmup history"""
+    load_start = pd.Timestamp(start_date) - timedelta(days=config.INDICATOR_LOOKBACK_DAYS)
+    frames = {}
+    for i, sym in enumerate(symbols, 1):
+        try:
+            df = db.get_ohlcv_data(sym, start_date=load_start, end_date=pd.Timestamp(end_date))
+        except Exception:
+            logger.exception("%s: failed to load data - excluded from backtest", sym)
+            continue
+        if df.empty:
+            logger.warning("%s: no data in range - excluded", sym)
+            continue
+        frames[sym] = df
+        if i % 50 == 0:
+            logger.info("Loaded %d/%d symbols", i, len(symbols))
+    return frames
+
+
+def run_backtest(
+    db,
+    symbols: list,
+    start_date: str,
+    end_date: str,
+    initial_capital: int = 100000,
+    universe_size: Optional[int] = None,
+):
     """
-    symbols_df = pd.read_sql(symbols_query, db.engine)
-    symbols = symbols_df['symbol'].tolist()
-    
-    # Run backtest
+    Run the VPVMA backtest against the database.
+
+    Args:
+        db: Database instance
+        symbols: Candidate symbols (SPY is used for the calendar/regime only)
+        start_date, end_date: Evaluation period
+        initial_capital: Starting cash
+        universe_size: Monthly top-N momentum universe (config.UNIVERSE_SIZE
+                       matches live trading); None trades every symbol
+    """
+    start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    spy_start = start - timedelta(days=config.REGIME_LOOKBACK_DAYS)
+    spy_data = db.get_ohlcv_data('SPY', start_date=spy_start, end_date=end)
+    frames = load_frames(db, [s for s in symbols if s != 'SPY'], start, end)
+    logger.info("Universe: %d symbols with data, period %s to %s", len(frames), start.date(), end.date())
+
+    results = run_backtest_on_frames(frames, spy_data, start, end, initial_capital, universe_size)
+    log_report(results)
+    return results
+
+
+def log_report(results: dict):
+    m = results['metrics']
+    p = results['portfolio']
+    lines = [
+        "=" * 80,
+        "BACKTEST RESULTS",
+        "=" * 80,
+        f"Total Return:      {m['total_return']:+.2f}%",
+        f"CAGR:              {m['cagr']:.2f}%",
+        f"Final Equity:      ${m['final_equity']:,.0f}",
+        f"Max Drawdown:      {m['max_dd']:.2f}%",
+        f"Sharpe:            {m['sharpe']:.2f}",
+        f"Sortino:           {m['sortino']:.2f}",
+        f"Omega:             {m['omega']:.2f}",
+        f"Calmar:            {m['calmar']:.2f}",
+        f"Annual Volatility: {m['annual_vol']:.2f}%",
+        f"Fills:             {m['num_trades']} ({m['num_round_trips']} round trips)",
+        f"Win Rate:          {m['win_rate']:.1f}%",
+        f"Avg Win / Loss:    ${m['avg_win']:,.0f} / ${m['avg_loss']:,.0f}",
+        f"Profit Factor:     {m['profit_factor']:.2f}",
+        f"Avg Hold:          {m['avg_hold_days']:.0f} days",
+        f"Open at end:       {len(p.positions)} positions",
+        f"Protection ON:     {p.protection_days}/{p.total_days} days",
+        f"FastExit / Normal sells: {p.fastexit_sells} / {p.normal_sells}",
+        f"Missed buy signals (no slot/cash/bar): {p.missed_signals}",
+        "=" * 80,
+    ]
+    for line in lines:
+        logger.info(line)
+
+
+def main():
+    import argparse
+    from logging_setup import setup_logging
+    from data.database import Database
+
+    parser = argparse.ArgumentParser(description='Run the VPVMA backtest')
+    parser.add_argument('--start', default='2005-01-01')
+    parser.add_argument('--end', help='Default: latest SPY bar in the database')
+    parser.add_argument('--capital', type=float, default=100000)
+    parser.add_argument('--all-symbols', action='store_true',
+                        help='Trade every symbol instead of the monthly top-N momentum universe')
+    parser.add_argument('--trades-csv', help='Write the trade list to this CSV file')
+    args = parser.parse_args()
+
+    setup_logging('backtest')
+    db = Database()
+    end = args.end or db.latest_timestamp('SPY')
+    if end is None:
+        logger.error("No SPY data - load history first (scripts/fetch_eod_historical.py)")
+        return 1
+
     results = run_backtest(
         db=db,
-        symbols=symbols,
-        start_date='2005-01-01',
-        end_date='2025-11-14',
-        initial_capital=100000
+        symbols=[s for s in db.list_symbols() if s != 'SPY'],
+        start_date=args.start,
+        end_date=end,
+        initial_capital=args.capital,
+        universe_size=None if args.all_symbols else config.UNIVERSE_SIZE,
     )
+    if args.trades_csv:
+        results['trades'].to_csv(args.trades_csv, index=False)
+        logger.info("Trades written to %s", args.trades_csv)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
