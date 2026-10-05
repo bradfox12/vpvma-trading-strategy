@@ -9,7 +9,8 @@ Checks (per symbol, against the SPY trading calendar):
 - ERROR  impossible bars: non-positive prices, low > open/close, high < open/close
 - WARN   sessions missing inside the symbol's own date range (gaps)
 - WARN   close-to-close moves beyond +100% / -50% (often an unadjusted split)
-- WARN   last bar older than SPY's last bar (delisted, renamed or not updating)
+- WARN   last bar older than SPY's last bar (renamed or not updating; known
+         delistings in the securities table are not flagged)
 - WARN   5+ consecutive zero-volume bars
 
 Exit code 1 if any ERROR is found.
@@ -46,6 +47,8 @@ def validate(db) -> pd.DataFrame:
         return pd.DataFrame(issues)
     calendar = pd.DatetimeIndex(spy['timestamp'])
     spy_last = calendar.max()
+    securities = db.get_securities()
+    delisted = set(securities.loc[securities['delist_date'].notna(), 'symbol']) if len(securities) else set()
 
     for symbol in db.list_symbols():
         df = db.get_ohlcv_data(symbol)
@@ -74,7 +77,7 @@ def validate(db) -> pd.DataFrame:
             detail = ', '.join(f"{ts[i]:%Y-%m-%d} {ret[i]:+.0%}" for i in jumps.index[:5])
             _issue(issues, 'WARN', symbol, 'jump', f"{len(jumps)} extreme moves: {detail}")
 
-        if ts.max() < spy_last:
+        if ts.max() < spy_last and symbol not in delisted:
             behind = len(calendar[calendar > ts.max()])
             _issue(issues, 'WARN', symbol, 'stale', f"last bar {ts.max():%Y-%m-%d} ({behind} sessions behind SPY)")
 

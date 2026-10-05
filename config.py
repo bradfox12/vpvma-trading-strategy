@@ -95,10 +95,36 @@ MAX_SWAPS_PER_DAY = None       # None = no cap
 SCREEN_NAME = 'liquidity'       # a key of screens.SCREENS - replace with your own screen
 SCREEN_FREQUENCY = 'quarterly'  # 'monthly' or 'quarterly'; runs on the first session of the period
 SCREEN_SIZE = 500               # Maximum tradable symbols (screens usually return fewer, ~250)
-SCREEN_LOOKBACK_DAYS = 400      # Calendar days of prices available to the screen
+SCREEN_LOOKBACK_DAYS = 500      # Calendar days of prices available to the screen
+                                # (12-month price strength + 250-session volume baseline)
 SCREEN_MIN_PRICE = 5.0          # Exclude stocks below this close
 SCREEN_MIN_DOLLAR_VOLUME = 5_000_000   # Minimum median daily $ volume (last 60 sessions)
 SCREEN_SECURITY_TYPES = ['CS']  # Common stock only (needs the securities table)
+
+# ============================================================================
+# LEADERS SCREEN - weighted factor score (see factor_model.py)
+# ============================================================================
+# Tradeable: 20-session average volume >= LEADERS_MIN_AVG_SHARES. Each stock is
+# scored on traits (growth, margins, price strength, accumulation, size...)
+# ranked as percentiles; weights are learned from history: how strongly each
+# trait separated "winners" (top LEADERS_WINNER_PCT of next-12-month return)
+# from the rest, using only quarters whose outcome was known at the time.
+LEADERS_MIN_AVG_SHARES = 250_000
+LEADERS_AVG_VOLUME_DAYS = 20
+LEADERS_SIZE = 250                       # stocks kept in the tradeable universe
+LEADERS_HORIZON_DAYS = 365               # forward window that defines a winner
+LEADERS_WINNER_PCT = 0.10                # top 10% = winner
+# 'contribution': top 10% by dollars added to the market (market value x 12-month return)
+# 'return':       top 10% by 12-month return
+LEADERS_WINNER_DEFINITION = 'contribution'
+LEADERS_SIZE_WEIGHT_CAP = None           # e.g. 0.30 limits the size trait to 30% of the weight
+# Split universe: top 'core' by the full score, plus top 'emerging' among companies
+# worth less than 'emerging_max_value', scored without size. None = one list.
+LEADERS_SPLIT = None                     # e.g. {'core': 150, 'emerging': 100, 'emerging_max_value': 20e9}
+LEADERS_HISTORY_START = '2012-01-01'     # first quarter used to learn weights
+LEADERS_ZERO_NEGATIVE_WEIGHTS = True     # traits that marked losers get weight 0 (False = negative weight)
+LEADERS_MIN_PRICE = 10.0                 # hard rule: last close must be at least $10
+LEADERS_MISSING_PERCENTILE = 0.5         # score for a missing trait: 0.5 = neutral, 0.0 = lowest
 
 # ============================================================================
 # PARAMETER NOTES

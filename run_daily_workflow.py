@@ -13,8 +13,8 @@ scheduler (cron / Task Scheduler) can alert on failure.
 Usage:
     python run_daily_workflow.py [--dry-run]
 
-Schedule (Mon-Fri after 4:30 PM ET), e.g. cron:
-    30 16 * * 1-5 cd /path/to/vpvma-trading-strategy && venv/bin/python run_daily_workflow.py
+Schedule (Mon-Fri after 6:00 PM ET, once Tiingo's end-of-day data is complete), e.g. cron:
+    15 18 * * 1-5 cd /path/to/vpvma-trading-strategy && venv/bin/python run_daily_workflow.py
 """
 
 import argparse

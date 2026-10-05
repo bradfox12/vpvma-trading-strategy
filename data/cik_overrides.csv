@@ -1,0 +1,6 @@
+# Extra SEC CIKs for a symbol, for predecessors that automatic name matching cannot
+# find (the company changed its name when it reorganised). Fundamentals from all
+# listed CIKs are merged under the symbol.
+symbol,cik,note
+GOOGL,1288776,Google Inc. (before the 2015 Alphabet reorganisation)
+GOOG,1288776,Google Inc. (before the 2015 Alphabet reorganisation)

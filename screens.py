@@ -69,10 +69,9 @@ class ScreenData:
         bars = db.get_bars(asof - pd.Timedelta(days=config.SCREEN_LOOKBACK_DAYS), asof)
         closes = bars.pivot(index='timestamp', columns='symbol', values='close')
         volumes = bars.pivot(index='timestamp', columns='symbol', values='volume')
-        funds = (db.get_fundamentals(asof, since=asof - pd.Timedelta(days=730))
+        # ~2.5 years of filings covers the 8 quarters growth/trend traits need
+        funds = (db.get_fundamentals(asof, since=asof - pd.Timedelta(days=900), fields=list(fields))
                  if fields else pd.DataFrame())
-        if not funds.empty:
-            funds = funds[funds['field'].isin(fields)]
         return cls(asof, closes, volumes, db.get_securities(), funds)
 
     def latest(self, fields: List[str], max_age_days: int = 450) -> pd.DataFrame:
@@ -180,7 +179,58 @@ class ExampleFundamentalScreen(Screen):
         return pd.DataFrame({'symbol': ranked.index, 'score': ranked.to_numpy()})
 
 
-SCREENS: Dict[str, Screen] = {s.name: s for s in (LiquidityScreen(), ExampleFundamentalScreen())}
+class LeadersScreen(Screen):
+    """
+    Weighted factor score that looks for stocks resembling past big winners
+    (see factor_model.py). Tradeable = 20-session average volume >=
+    config.LEADERS_MIN_AVG_SHARES; keeps the top config.LEADERS_SIZE by score.
+    Weights are learned from the factor history file, using only quarters whose
+    12-month outcome was known on the screening date.
+    """
+    name = 'leaders'
+
+    def __init__(self, history: Optional[pd.DataFrame] = None, name: str = 'leaders',
+                 size_cap: Optional[float] = None, split: Optional[dict] = None):
+        from factor_model import FUNDAMENTAL_FIELDS
+        self.fields = FUNDAMENTAL_FIELDS
+        self.name = name
+        self.size_cap = size_cap          # None -> config.LEADERS_SIZE_WEIGHT_CAP
+        self.split = split                # None -> config.LEADERS_SPLIT
+        self._history = history
+
+    @property
+    def history(self) -> pd.DataFrame:
+        if self._history is None:
+            from factor_model import load_history
+            self._history = load_history()
+        return self._history
+
+    def weights(self, asof) -> pd.Series:
+        from factor_model import learn_weights
+        return learn_weights(self.history, asof)
+
+    def select(self, data: ScreenData) -> pd.DataFrame:
+        from factor_model import compute_traits, select_universe, tradeable
+        symbols = tradeable(data.closes, data.volumes, data.asof, data.securities)
+        if len(symbols) == 0:
+            return pd.DataFrame(columns=['symbol', 'score'])
+        raw = compute_traits(data.closes, data.volumes, data.fundamentals, data.asof, symbols)
+        ranked = select_universe(raw, self.history, data.asof, split=self.split, size_cap=self.size_cap)
+        return pd.DataFrame({'symbol': ranked.index, 'score': ranked.to_numpy()})
+
+
+class EligibleScreen(Screen):
+    """Every stock passing the leaders volume and price rules, unscored (baseline)"""
+    name = 'eligible'
+
+    def select(self, data: ScreenData) -> pd.DataFrame:
+        from factor_model import tradeable
+        symbols = tradeable(data.closes, data.volumes, data.asof, data.securities)
+        return pd.DataFrame({'symbol': list(symbols), 'score': 0.0})
+
+
+SCREENS: Dict[str, Screen] = {s.name: s for s in (LiquidityScreen(), ExampleFundamentalScreen(),
+                                                   LeadersScreen(), EligibleScreen())}
 
 
 def get_screen(name: Optional[str] = None) -> Screen:

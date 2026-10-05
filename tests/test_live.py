@@ -19,16 +19,6 @@ def test_regime_uses_full_200_day_ma():
     assert detect_bear_regime(FakeDB({'SPY': spy}), dates[-1]) is True
 
 
-def test_eod_adjustment_scales_whole_bar():
-    from scripts.fetch_eod_historical import adjust_ohlcv
-    raw = pd.DataFrame({'date': ['2020-01-02', '2020-01-03'], 'open': [200.0, 101.0],
-                        'high': [210.0, 103.0], 'low': [190.0, 99.0], 'close': [204.0, 102.0],
-                        'adjusted_close': [102.0, 102.0], 'volume': [1000, 2000]})
-    df = adjust_ohlcv(raw)  # 2:1 split between the bars
-    assert df.loc[0, ['open', 'high', 'low', 'close']].tolist() == [100.0, 105.0, 95.0, 102.0]
-    assert df.loc[0, 'volume'] == 2000
-
-
 def test_logging_survives_unencodable_console(tmp_path, monkeypatch):
     import logging_setup
     stream = io.TextIOWrapper(io.BytesIO(), encoding='cp1252')

@@ -42,8 +42,10 @@ class SecureConfig:
             )
 
         # URL.create escapes special characters in the password (@, :, / ...)
+        # psycopg2 is the installed driver (SQLAlchemy 2.1 defaults to psycopg 3)
+        drivername = 'postgresql+psycopg2' if db_type == 'postgresql' else db_type
         return URL.create(
-            drivername=db_type,
+            drivername=drivername,
             username=cls.DB_USER,
             password=cls.DB_PASSWORD,
             host=cls.DB_HOST,

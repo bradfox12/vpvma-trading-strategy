@@ -6,15 +6,13 @@ Schema is defined with SQLAlchemy Core, so the same code runs on PostgreSQL
 
 Tables:
 - ohlcv_data: one fully adjusted daily bar per (symbol, session date at midnight)
-- corporate_actions: splits/dividends already applied to ohlcv_data, so an
-  adjustment can never be applied twice
 - securities: security master (type, exchange, listing dates, sector)
 - fundamentals: point-in-time fundamentals keyed by the date they became public
 """
 
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import pandas as pd
 from sqlalchemy import (
@@ -43,18 +41,6 @@ ohlcv_table = Table(
     Index('idx_symbol_timestamp', 'symbol', 'timestamp'),
 )
 
-corporate_actions_table = Table(
-    'corporate_actions', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=True),
-    Column('symbol', String(20), nullable=False),
-    Column('ex_date', DateTime, nullable=False),
-    Column('kind', String(10), nullable=False),          # 'split' | 'dividend'
-    Column('price_factor', Float, nullable=False),       # multiplier for prices before ex_date
-    Column('details', String(200)),
-    Column('applied_at', DateTime, server_default=func.current_timestamp()),
-    UniqueConstraint('symbol', 'ex_date', 'kind'),
-)
-
 securities_table = Table(
     'securities', metadata,
     Column('symbol', String(20), primary_key=True),
@@ -65,6 +51,16 @@ securities_table = Table(
     Column('industry', String(200)),
     Column('list_date', DateTime),
     Column('delist_date', DateTime),       # NULL while still listed
+    Column('perma_ticker', String(20)),    # Tiingo permanent id (survives ticker reuse)
+)
+
+# SEC filers whose fundamentals belong to a symbol (main CIK + predecessors)
+security_ciks_table = Table(
+    'security_ciks', metadata,
+    Column('symbol', String(20), nullable=False),
+    Column('cik', Integer, nullable=False),
+    Column('how', String(200)),
+    UniqueConstraint('symbol', 'cik'),
 )
 
 # Point-in-time fundamentals, long format: one row per (symbol, field, period,
@@ -84,7 +80,8 @@ fundamentals_table = Table(
 )
 
 OHLCV_COLUMNS = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-SECURITY_COLUMNS = ['symbol', 'name', 'type', 'exchange', 'sector', 'industry', 'list_date', 'delist_date']
+SECURITY_COLUMNS = ['symbol', 'name', 'type', 'exchange', 'sector', 'industry', 'list_date', 'delist_date',
+                    'perma_ticker']
 FUNDAMENTAL_COLUMNS = ['symbol', 'field', 'period_end', 'available_date', 'value']
 
 
@@ -163,43 +160,13 @@ class Database:
             conn.execute(ohlcv_table.insert(), bars.to_dict('records'))
         return len(bars)
 
-    def apply_adjustment(self, symbol: str, ex_date, kind: str, price_factor: float, details: str = '') -> bool:
-        """
-        Back-adjust a symbol's bars before ex_date for a split or dividend.
-
-        Prices are multiplied by price_factor and volume divided by it, matching
-        how the historical loader adjusts EOD data. Recorded in corporate_actions
-        in the same transaction; returns False if this action was already applied.
-        """
-        ex_date = pd.Timestamp(ex_date).to_pydatetime()
-        if not (0 < price_factor < 100):
-            raise ValueError(f"{symbol}: implausible {kind} factor {price_factor}")
-
+    def rename_symbol(self, old: str, new: str):
+        """Move every row stored under `old` to `new` (ticker change, e.g. FB -> META)"""
+        from sqlalchemy import update
         with self.engine.begin() as conn:
-            already = conn.execute(
-                select(corporate_actions_table.c.id).where(
-                    corporate_actions_table.c.symbol == symbol,
-                    corporate_actions_table.c.ex_date == ex_date,
-                    corporate_actions_table.c.kind == kind,
-                )
-            ).first()
-            if already:
-                return False
-            t = ohlcv_table.c
-            conn.execute(
-                ohlcv_table.update()
-                .where(t.symbol == symbol, t.timestamp < ex_date)
-                .values(open=t.open * price_factor, high=t.high * price_factor,
-                        low=t.low * price_factor, close=t.close * price_factor,
-                        volume=func.round(t.volume / price_factor))
-            )
-            conn.execute(corporate_actions_table.insert().values(
-                symbol=symbol, ex_date=ex_date, kind=kind,
-                price_factor=price_factor, details=details[:200],
-            ))
-        logger.info("%s: applied %s on %s (price factor %.6f) %s",
-                    symbol, kind, ex_date.date(), price_factor, details)
-        return True
+            for table in (ohlcv_table, fundamentals_table, security_ciks_table, securities_table):
+                conn.execute(update(table).where(table.c.symbol == old).values(symbol=new))
+        logger.info("Renamed %s -> %s", old, new)
 
     # ------------------------------------------------------------------- reads
 
@@ -285,6 +252,17 @@ class Database:
             conn.execute(securities_table.insert(), df.to_dict('records'))
         return len(df)
 
+    def set_security_ciks(self, symbol: str, links: List[tuple]):
+        """Replace a symbol's SEC CIK links: [(cik, how), ...]"""
+        with self.engine.begin() as conn:
+            conn.execute(security_ciks_table.delete().where(security_ciks_table.c.symbol == symbol))
+            if links:
+                conn.execute(security_ciks_table.insert(),
+                             [{'symbol': symbol, 'cik': int(c), 'how': how[:200]} for c, how in links])
+
+    def get_security_ciks(self) -> pd.DataFrame:
+        return pd.read_sql(select(security_ciks_table), self.engine)
+
     def get_securities(self) -> pd.DataFrame:
         """The securities master (empty if not loaded yet)"""
         return pd.read_sql(select(securities_table), self.engine, parse_dates=['list_date', 'delist_date'])
@@ -318,7 +296,17 @@ class Database:
             conn.execute(fundamentals_table.insert(), df.astype(object).where(df.notna(), None).to_dict('records'))
         return len(df)
 
-    def get_fundamentals(self, available_by, since=None, symbols: Optional[List[str]] = None) -> pd.DataFrame:
+    def avg_volume_by_year(self) -> pd.Series:
+        """Average daily share volume per (symbol, year), computed in the database"""
+        t = ohlcv_table.c
+        year = func.extract('year', t.timestamp).label('year')
+        query = select(t.symbol, year, func.avg(t.volume).label('avg_volume')).group_by(t.symbol, year)
+        df = pd.read_sql(query, self.engine)
+        df['year'] = df['year'].astype(int)
+        return df.set_index(['symbol', 'year'])['avg_volume'].astype(float)
+
+    def get_fundamentals(self, available_by, since=None, symbols: Optional[List[str]] = None,
+                         fields: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Fundamentals rows public on or before `available_by` (optionally after `since`)
 
@@ -332,19 +320,10 @@ class Database:
             query = query.where(f.available_date > pd.Timestamp(since).to_pydatetime())
         if symbols is not None:
             query = query.where(f.symbol.in_(list(symbols)))
+        if fields is not None:
+            query = query.where(f.field.in_(list(fields)))
         return pd.read_sql(query, self.engine, parse_dates=['period_end', 'available_date'])
 
-    def last_closes_before(self, symbols: List[str], date) -> Dict[str, float]:
-        """Most recent close strictly before `date` for each symbol"""
-        t = ohlcv_table.c
-        date = pd.Timestamp(date).to_pydatetime()
-        latest = (select(t.symbol, func.max(t.timestamp).label('ts'))
-                  .where(t.symbol.in_(symbols), t.timestamp < date)
-                  .group_by(t.symbol).subquery())
-        query = select(t.symbol, t.close).join(
-            latest, (t.symbol == latest.c.symbol) & (t.timestamp == latest.c.ts))
-        df = pd.read_sql(query, self.engine)
-        return dict(zip(df['symbol'], df['close'].astype(float)))
 
 
 if __name__ == "__main__":

@@ -124,29 +124,32 @@ form inverted both rules on those days.
 ## Implementation
 
 ### Technology Stack
-- Python 3.12, NumPy, pandas, SQLAlchemy
-- SQLite (default) or PostgreSQL
-- EOD Historical Data (one-off historical load), Massive/Polygon.io (daily updates; free plan works)
+- Python 3.12, NumPy, pandas, SQLAlchemy, PostgreSQL (SQLite for tests)
+- Tiingo Power: company list (active + delisted) and split/dividend-adjusted daily prices
+- SEC EDGAR (free): point-in-time quarterly fundamentals from XBRL company facts
 
 ### Setup and data
 ```bash
 python -m venv venv && venv/bin/pip install -r requirements.txt
-cp .env.example .env                        # set DB_TYPE, EOD_API_KEY, MARKET_API_KEY
-python scripts/fetch_eod_historical.py      # load symbols.txt from 2005 (resume: --missing-only)
-python scripts/validate_data.py             # gaps, bad bars, unadjusted splits, stale symbols
-python backtest.py --trades-csv trades.csv  # full backtest to the latest bar
-python visualize_results.py                 # charts in charts/
+cp .env.example .env                        # DB_*, TIINGO_API_KEY, SEC_USER_AGENT
+python scripts/phase1_sample.py             # optional: small test of both data sources
+python scripts/load_universe.py             # full load (resumable; ~1-2 hours)
+python scripts/validate_data.py             # gaps, bad bars, unexplained jumps, stale symbols
+python backtest.py --trades-csv trades.csv  # backtest to the latest bar
 ```
-`symbols.txt` is the candidate universe (SPY is required). Adding delisted
-tickers reduces survivorship bias.
+`load_universe.py` writes coverage reports to `logs/` (fundamentals coverage of
+tradeable stocks by year, unmatched companies). Companies whose SEC history a
+name match cannot find (e.g. Google -> Alphabet) go in `data/cik_overrides.csv`.
 
 ### Daily operation
 ```bash
-python run_daily_workflow.py                # data update, then orders for the next session
+python run_daily_workflow.py                # after 6 PM ET: data update, then orders for the next session
 python daily_portfolio_manager.py --dry-run # preview orders without saving anything
 ```
-- `daily_update.py` backfills every missed session, skips market holidays and
-  applies splits/dividends to stored history before appending new bars.
+- `daily_update.py` refreshes the company list (new listings, ticker changes,
+  delistings), appends new bars and re-downloads a stock's history when it pays
+  a dividend or splits, and reloads fundamentals for companies that filed a
+  10-K/10-Q. It fails - so no orders are generated - if the session's data is incomplete.
 - `portfolio_state.json` is the ledger (cash + positions); back it up.
   `trade_tracker.xlsx` and `daily_orders.html` are reports generated from it.
 - Logs are in `logs/`. Run `pytest` for the test suite (no database or API keys needed).
@@ -159,9 +162,12 @@ python daily_portfolio_manager.py --dry-run # preview orders without saving anyt
 ├── protection/
 │   └── market_regime.py    # SPY 200-day regime (FastExit trigger)
 ├── data/
-│   └── database.py         # SQLite/PostgreSQL storage + corporate-action adjustments
+│   ├── database.py         # PostgreSQL/SQLite storage (prices, securities, fundamentals)
+│   ├── tiingo.py           # Tiingo company list + adjusted prices
+│   └── sec_edgar.py        # SEC company facts -> point-in-time quarterly fundamentals
 ├── scripts/
-│   ├── fetch_eod_historical.py # Historical load (fully adjusted OHLCV)
+│   ├── load_universe.py    # Full load of US stocks + coverage report
+│   ├── phase1_sample.py    # Small end-to-end data test
 │   └── validate_data.py    # Data quality checks
 ├── strategy.py             # Shared decision engine (backtest + live)
 ├── backtest.py             # Backtest engine (next-open fills)
