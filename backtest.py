@@ -1,21 +1,25 @@
 """
 VPVMA Backtest with FastExit+SPY200 Protection
 
-Uses the same decision engine as live trading (strategy.plan_day), so entry,
-exit, universe and replacement rules cannot drift between the two.
+Uses the same screen (screens.py) and decision engine (strategy.plan_day) as
+live trading, so universe, entry, exit and swap rules cannot drift apart.
+
+Pipeline:
+1. Close/volume panels for every candidate symbol
+2. The screen runs on the first session of each SCREEN_FREQUENCY period using
+   only data public on that date -> universe per period
+3. VPVMA indicators are computed only for symbols that are ever in a universe
+4. Daily loop: fill yesterday's orders at today's open, mark to market,
+   decide tomorrow's orders from today's close
 
 Execution model:
-- Signals are computed at the close of day t
 - Orders fill at the OPEN of the symbol's next bar (no same-close fills)
 - Slippage and commission from config
 - Held symbols whose data stops (delisting, ticker change) are force-sold at
   their last close after DELIST_GRACE_DAYS trading days without a bar
 
-Indicators are computed once per symbol over the full loaded history; values at
-day t only use bars up to t, so there is no look-ahead.
-
 Run from project directory:
-    python backtest.py
+    python backtest.py [--start 2005-01-01] [--end YYYY-MM-DD] [--trades-csv trades.csv]
 """
 
 import sys
@@ -24,18 +28,18 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import logging
 from datetime import timedelta
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 import config
 from protection.market_regime import bear_regime_series
+from screens import Screen, ScreenData, get_screen, rebalance_key
 from strategy import (
     compute_indicator_frame,
     fill_price,
     plan_day,
-    rank_by_momentum,
     shares_for,
     SymbolSignal,
 )
@@ -43,7 +47,7 @@ from strategy import (
 logger = logging.getLogger(__name__)
 
 DELIST_GRACE_DAYS = 5
-PANEL_COLUMNS = ['open', 'close', 'vpvma', 'vpvmas', 'vpvma_prev', 'vpvmas_prev', 'buy_signal', 'strength']
+SIGNAL_COLUMNS = ['open', 'close', 'vpvma', 'vpvmas', 'vpvma_prev', 'vpvmas_prev', 'buy_signal', 'strength']
 
 
 class ProtectedPortfolio:
@@ -117,63 +121,105 @@ class ProtectedPortfolio:
         return True
 
 
-def build_panels(frames: Dict[str, pd.DataFrame], trading_days: pd.DatetimeIndex) -> Dict[str, pd.DataFrame]:
-    """Align every symbol's indicator frame to the trading calendar: column -> (day × symbol)"""
-    indicator = {sym: compute_indicator_frame(df) for sym, df in frames.items() if len(df) > 0}
-    panels = {}
-    for col in PANEL_COLUMNS:
-        panels[col] = pd.DataFrame(
-            {sym: f[col].reindex(trading_days) for sym, f in indicator.items()},
-            index=trading_days,
-        )
-    panels['last_bar'] = pd.Series({sym: f.index.max() for sym, f in indicator.items()})
-    panels['closes'] = {sym: f['close'] for sym, f in indicator.items()}
-    return panels
+def close_volume_panels(frames: Dict[str, pd.DataFrame]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """(closes, volumes) with one column per symbol, indexed by every date any symbol traded"""
+    closes = pd.DataFrame({s: f.set_index('timestamp')['close'] for s, f in frames.items()}).sort_index()
+    volumes = pd.DataFrame({s: f.set_index('timestamp')['volume'] for s, f in frames.items()}).sort_index()
+    return closes.astype(float), volumes.astype(float)
 
 
-def run_backtest_on_frames(
+def rebalance_dates(trading_days: pd.DatetimeIndex, frequency: str = None) -> List[pd.Timestamp]:
+    """First session of the backtest and of every new screening period"""
+    keys = [rebalance_key(d, frequency) for d in trading_days]
+    return [d for i, d in enumerate(trading_days) if i == 0 or keys[i] != keys[i - 1]]
+
+
+def run_screens(screen: Screen, dates, closes, volumes, securities=None, fundamentals=None) -> List[dict]:
+    """Universe for each rebalance date: [{'date', 'symbols'}]"""
+    if fundamentals is not None and not fundamentals.empty and screen.fields:
+        fundamentals = fundamentals[fundamentals['field'].isin(screen.fields)]
+    history = []
+    for date in dates:
+        data = ScreenData.from_panels(date, closes, volumes, securities, fundamentals)
+        selected = screen.select(data)
+        history.append({'date': date, 'symbols': selected['symbol'].tolist()})
+        logger.info("Screen %s on %s: %d symbols", screen.name, date.date(), len(selected))
+    return history
+
+
+class SignalPanel:
+    """Indicator values for a set of symbols over a block of trading days (numpy, row = day)"""
+
+    def __init__(self, indicators: Dict[str, pd.DataFrame], symbols, days: pd.DatetimeIndex):
+        self.symbols = sorted(set(symbols) & set(indicators))
+        self.col = {s: j for j, s in enumerate(self.symbols)}
+        self.days = days
+        self.values = {c: np.full((len(days), len(self.symbols)), np.nan) for c in SIGNAL_COLUMNS}
+        for j, sym in enumerate(self.symbols):
+            frame = indicators[sym].reindex(days)
+            for c in SIGNAL_COLUMNS:
+                self.values[c][:, j] = frame[c].to_numpy(dtype=float)
+
+    def get(self, column: str, row: int, symbol: str) -> float:
+        j = self.col.get(symbol)
+        return np.nan if j is None else self.values[column][row, j]
+
+    def signal(self, row: int, symbol: str) -> Optional[SymbolSignal]:
+        j = self.col.get(symbol)
+        if j is None:
+            return None
+        v = {c: self.values[c][row, j] for c in SIGNAL_COLUMNS}
+        if np.isnan(v['vpvma']) or np.isnan(v['vpvmas']):
+            return None
+        return SymbolSignal(symbol, v['close'], v['vpvma'], v['vpvmas'], v['vpvma_prev'],
+                            v['vpvmas_prev'], bool(v['buy_signal'] == 1), v['strength'])
+
+    def buy_candidates(self, row: int, allowed: set) -> List[str]:
+        hits = np.nonzero(self.values['buy_signal'][row] == 1)[0]
+        return [self.symbols[j] for j in hits if self.symbols[j] in allowed]
+
+
+def simulate(
     frames: Dict[str, pd.DataFrame],
     spy_data: pd.DataFrame,
     start_date,
     end_date,
     initial_capital: float = 100000,
-    universe_size: Optional[int] = None,
-    momentum_period: Optional[int] = None,
+    universe_history: Optional[List[dict]] = None,
 ) -> dict:
     """
-    Backtest on in-memory OHLCV frames (no database access).
+    Day-by-day simulation.
 
     Args:
-        frames: symbol -> DataFrame[timestamp, open, high, low, close, volume]
-                (include history before start_date for indicator warmup)
-        spy_data: SPY OHLCV; defines the trading calendar and the regime
-        start_date, end_date: Evaluation period
-        initial_capital: Starting cash
-        universe_size: Top-N momentum universe re-selected monthly; None trades every symbol
-        momentum_period: Momentum lookback in bars (default config.MOMENTUM_PERIOD)
+        frames: symbol -> OHLCV for every symbol that can be traded
+        spy_data: SPY OHLCV (calendar + regime)
+        universe_history: [{'date', 'symbols'}] from run_screens(); None trades every symbol
     """
     start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
-    momentum_period = momentum_period or config.MOMENTUM_PERIOD
-
     spy_data = spy_data.sort_values('timestamp').reset_index(drop=True)
     regime = bear_regime_series(spy_data)
-    trading_days = pd.DatetimeIndex(spy_data['timestamp'])
-    trading_days = trading_days[(trading_days >= start) & (trading_days <= end)]
+    all_days = pd.DatetimeIndex(spy_data['timestamp'])
+    trading_days = all_days[(all_days >= start) & (all_days <= end)]
     if len(trading_days) == 0:
         raise ValueError(f"No SPY trading days between {start.date()} and {end.date()}")
 
+    if universe_history is None:
+        universe_history = [{'date': trading_days[0], 'symbols': sorted(frames)}]
+    period_starts = {h['date']: h['symbols'] for h in universe_history}
+
     logger.info("Computing indicators for %d symbols...", len(frames))
-    panels = build_panels(frames, trading_days)
-    symbols = list(panels['open'].columns)
+    indicators = {s: compute_indicator_frame(f) for s, f in frames.items() if len(f) > 0}
+    last_bar = {s: f.index.max() for s, f in indicators.items()}
+    day_pos = {d: i for i, d in enumerate(all_days)}
 
     portfolio = ProtectedPortfolio(initial_capital=initial_capital)
     marks: Dict[str, float] = {}
     pending = None
-    pending_strength = {}
-    universe = None
-    universe_month = None
-    universe_history = []
-    day_pos = {d: i for i, d in enumerate(trading_days)}
+    pending_strength: Dict[str, float] = {}
+    swap_streaks: Dict[str, int] = {}
+    universe: set = set()
+    panel: Optional[SignalPanel] = None
+    row = -1
 
     total_days = len(trading_days)
     step = max(1, total_days // 20)
@@ -182,8 +228,19 @@ def run_backtest_on_frames(
         if i % step == 0:
             logger.info("Progress: %d%% (%s)", int(i / total_days * 100), date.date())
 
-        opens = panels['open'].loc[date]
-        closes = panels['close'].loc[date]
+        # New screening period: new universe and a fresh signal panel for its days
+        if date in period_starts or panel is None:
+            if date in period_starts:
+                universe = set(period_starts[date])
+            next_starts = [d for d in period_starts if d > date]
+            block_end = min(next_starts) if next_starts else trading_days[-1] + pd.Timedelta(days=1)
+            block_days = trading_days[(trading_days >= date) & (trading_days < block_end)]
+            needed = universe | set(portfolio.positions)
+            if pending is not None:
+                needed |= set(pending.buys) | {r['buy_symbol'] for r in pending.replacements}
+            panel = SignalPanel(indicators, needed, block_days)
+            row = -1
+        row += 1
 
         # 1. Fill yesterday's orders at today's open
         unfilled_sells = []
@@ -192,34 +249,32 @@ def run_backtest_on_frames(
                                      for r in pending.replacements]
             for order in exits:
                 sym = order['symbol']
-                px = opens.get(sym)
-                if px is None or np.isnan(px):
+                px = panel.get('open', row, sym)
+                if np.isnan(px):
                     unfilled_sells.append(order)  # no bar today - retry at the next bar
                     continue
                 portfolio.sell(sym, px, date, order['reason'], order['fast_exit'])
             equity = portfolio.equity(marks)
-            buy_list = [r['buy_symbol'] for r in pending.replacements] + pending.buys
-            for sym in buy_list:
-                px = opens.get(sym)
-                if px is None or np.isnan(px):
+            for sym in [r['buy_symbol'] for r in pending.replacements] + pending.buys:
+                px = panel.get('open', row, sym)
+                if np.isnan(px):
                     portfolio.missed_signals += 1
                     continue
                 portfolio.buy(sym, px, date, equity, pending_strength.get(sym, 0.0))
 
-        # 2. Mark to market
-        for sym, px in closes.dropna().items():
-            marks[sym] = float(px)
+        # 2. Mark held positions to market
+        for sym in portfolio.positions:
+            px = panel.get('close', row, sym)
+            if not np.isnan(px):
+                marks[sym] = float(px)
 
         # 3. Force-exit positions whose data has stopped
         for sym in list(portfolio.positions):
-            last_bar = panels['last_bar'].get(sym)
-            if last_bar is not None and last_bar < date:
-                bars_since = i - day_pos.get(last_bar, i - DELIST_GRACE_DAYS - 1)
-                if last_bar not in day_pos or bars_since > DELIST_GRACE_DAYS:
-                    logger.warning("%s: no data since %s - closing at last close %.2f",
-                                   sym, last_bar.date(), marks.get(sym, np.nan))
-                    portfolio.sell(sym, marks.get(sym, portfolio.positions[sym]['entry_price']),
-                                   date, 'No Data')
+            lb = last_bar.get(sym)
+            if lb is not None and lb < date and day_pos[date] - day_pos.get(lb, -10**9) > DELIST_GRACE_DAYS:
+                logger.warning("%s: no data since %s - closing at last close %.2f",
+                               sym, lb.date(), marks.get(sym, np.nan))
+                portfolio.sell(sym, marks.get(sym, portfolio.positions[sym]['entry_price']), date, 'No Data')
 
         # 4. Regime
         bearish = bool(regime.asof(date)) if len(regime) else False
@@ -227,34 +282,19 @@ def run_backtest_on_frames(
         portfolio.total_days += 1
         portfolio.protection_days += int(portfolio.protection_active)
 
-        # 5. Monthly momentum universe
-        if universe_size is not None and date.strftime('%Y-%m') != universe_month:
-            ranked = rank_by_momentum(panels['closes'], date, momentum_period, universe_size)
-            universe = ranked['symbol'].tolist()
-            universe_month = date.strftime('%Y-%m')
-            universe_history.append({'date': date, 'symbols': universe})
-
-        # 6. Today's signals
+        # 5. Today's signals: every holding + today's buy candidates in the universe
         signals = {}
-        valid = panels['vpvmas'].loc[date].notna() & panels['vpvma'].loc[date].notna()
-        for sym in valid[valid].index:
-            signals[sym] = SymbolSignal(
-                symbol=sym,
-                price=float(closes[sym]),
-                vpvma=float(panels['vpvma'].at[date, sym]),
-                vpvmas=float(panels['vpvmas'].at[date, sym]),
-                vpvma_prev=float(panels['vpvma_prev'].at[date, sym]),
-                vpvmas_prev=float(panels['vpvmas_prev'].at[date, sym]),
-                buy_signal=bool(panels['buy_signal'].at[date, sym]),
-                strength=float(panels['strength'].at[date, sym]),
-            )
-        portfolio.total_buy_signals += sum(
-            1 for s in signals.values()
-            if s.buy_signal and (universe is None or s.symbol in universe)
-        )
+        watch = set(portfolio.positions) | set(panel.buy_candidates(row, universe)) | set(swap_streaks)
+        for sym in watch:
+            sig = panel.signal(row, sym)
+            if sig is not None:
+                signals[sym] = sig
+        portfolio.total_buy_signals += sum(1 for s in signals.values() if s.buy_signal and s.symbol in universe)
 
-        # 7. Decide tomorrow's orders
-        pending = plan_day(portfolio.positions, signals, portfolio.protection_active, universe)
+        # 6. Decide tomorrow's orders
+        pending = plan_day(portfolio.positions, signals, portfolio.protection_active, universe,
+                           swap_streaks=swap_streaks)
+        swap_streaks = pending.swap_streaks
         planned = {o['symbol'] for o in pending.sells} | {r['sell_symbol'] for r in pending.replacements}
         pending.sells += [o for o in unfilled_sells
                           if o['symbol'] in portfolio.positions and o['symbol'] not in planned]
@@ -275,15 +315,44 @@ def run_backtest_on_frames(
     df_trades = pd.DataFrame(portfolio.trades, columns=[
         'date', 'symbol', 'action', 'shares', 'price', 'commission', 'pnl',
         'hold_days', 'protection_active', 'fast_exit', 'exit_reason'])
-    metrics = compute_metrics(df_history, df_trades, initial_capital)
-
     return {
         'history': df_history,
         'trades': df_trades,
         'portfolio': portfolio,
-        'metrics': metrics,
+        'metrics': compute_metrics(df_history, df_trades, initial_capital),
         'universe_history': universe_history,
     }
+
+
+def run_backtest_on_frames(
+    frames: Dict[str, pd.DataFrame],
+    spy_data: pd.DataFrame,
+    start_date,
+    end_date,
+    initial_capital: float = 100000,
+    screen: Optional[Screen] = None,
+    securities: pd.DataFrame = None,
+    fundamentals: pd.DataFrame = None,
+) -> dict:
+    """
+    Backtest on in-memory OHLCV frames (no database access).
+
+    Args:
+        frames: symbol -> DataFrame[timestamp, open, high, low, close, volume]
+                (include history before start_date for indicator warmup)
+        spy_data: SPY OHLCV; defines the trading calendar and the regime
+        screen: Universe screen re-run each SCREEN_FREQUENCY period; None trades every symbol
+        securities / fundamentals: Inputs for the screen (optional)
+    """
+    universe_history = None
+    if screen is not None:
+        closes, volumes = close_volume_panels(frames)
+        days = pd.DatetimeIndex(spy_data['timestamp'])
+        days = days[(days >= pd.Timestamp(start_date)) & (days <= pd.Timestamp(end_date))]
+        universe_history = run_screens(screen, rebalance_dates(days), closes, volumes, securities, fundamentals)
+        traded = set().union(*(set(h['symbols']) for h in universe_history))
+        frames = {s: f for s, f in frames.items() if s in traded}
+    return simulate(frames, spy_data, start_date, end_date, initial_capital, universe_history)
 
 
 def compute_metrics(df_history: pd.DataFrame, df_trades: pd.DataFrame, initial_capital: float) -> dict:
@@ -335,51 +404,71 @@ def compute_metrics(df_history: pd.DataFrame, df_trades: pd.DataFrame, initial_c
     }
 
 
+def load_close_volume_panels(db, symbols, start, end, chunk: int = 250) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Close/volume panels for many symbols, loaded in chunks to limit memory"""
+    closes, volumes = [], []
+    for k in range(0, len(symbols), chunk):
+        bars = db.get_bars(start, end, symbols=symbols[k:k + chunk])
+        closes.append(bars.pivot(index='timestamp', columns='symbol', values='close'))
+        volumes.append(bars.pivot(index='timestamp', columns='symbol', values='volume'))
+        logger.info("Loaded close/volume for %d/%d symbols", min(k + chunk, len(symbols)), len(symbols))
+    return pd.concat(closes, axis=1).sort_index(), pd.concat(volumes, axis=1).sort_index()
+
+
 def load_frames(db, symbols, start_date, end_date) -> Dict[str, pd.DataFrame]:
-    """Load OHLCV for every symbol once, with indicator warmup history"""
+    """Full OHLCV for each symbol, with indicator warmup history"""
     load_start = pd.Timestamp(start_date) - timedelta(days=config.INDICATOR_LOOKBACK_DAYS)
     frames = {}
-    for i, sym in enumerate(symbols, 1):
+    for i, sym in enumerate(sorted(symbols), 1):
         try:
             df = db.get_ohlcv_data(sym, start_date=load_start, end_date=pd.Timestamp(end_date))
         except Exception:
             logger.exception("%s: failed to load data - excluded from backtest", sym)
             continue
-        if df.empty:
-            logger.warning("%s: no data in range - excluded", sym)
-            continue
-        frames[sym] = df
-        if i % 50 == 0:
-            logger.info("Loaded %d/%d symbols", i, len(symbols))
+        if not df.empty:
+            frames[sym] = df
+        if i % 250 == 0:
+            logger.info("Loaded OHLCV for %d/%d symbols", i, len(symbols))
     return frames
 
 
 def run_backtest(
     db,
-    symbols: list,
-    start_date: str,
-    end_date: str,
-    initial_capital: int = 100000,
-    universe_size: Optional[int] = None,
+    start_date,
+    end_date,
+    initial_capital: float = 100000,
+    screen: Optional[Screen] = None,
+    symbols: Optional[List[str]] = None,
 ):
     """
     Run the VPVMA backtest against the database.
 
     Args:
         db: Database instance
-        symbols: Candidate symbols (SPY is used for the calendar/regime only)
         start_date, end_date: Evaluation period
         initial_capital: Starting cash
-        universe_size: Monthly top-N momentum universe (config.UNIVERSE_SIZE
-                       matches live trading); None trades every symbol
+        screen: Universe screen (same one live trading uses); None trades every symbol
+        symbols: Candidate symbols (default: every symbol in the database except SPY)
     """
     start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
-    spy_start = start - timedelta(days=config.REGIME_LOOKBACK_DAYS)
-    spy_data = db.get_ohlcv_data('SPY', start_date=spy_start, end_date=end)
-    frames = load_frames(db, [s for s in symbols if s != 'SPY'], start, end)
-    logger.info("Universe: %d symbols with data, period %s to %s", len(frames), start.date(), end.date())
+    symbols = [s for s in (symbols or db.list_symbols()) if s != 'SPY']
+    spy_data = db.get_ohlcv_data('SPY', start_date=start - timedelta(days=config.REGIME_LOOKBACK_DAYS), end_date=end)
+    days = pd.DatetimeIndex(spy_data['timestamp'])
+    days = days[(days >= start) & (days <= end)]
 
-    results = run_backtest_on_frames(frames, spy_data, start, end, initial_capital, universe_size)
+    universe_history = None
+    if screen is not None:
+        closes, volumes = load_close_volume_panels(
+            db, symbols, start - timedelta(days=config.SCREEN_LOOKBACK_DAYS), end)
+        fundamentals = (db.get_fundamentals(end) if screen.fields else None)
+        universe_history = run_screens(screen, rebalance_dates(days), closes, volumes,
+                                       db.get_securities(), fundamentals)
+        del closes, volumes
+        symbols = sorted(set().union(*(set(h['symbols']) for h in universe_history)))
+
+    frames = load_frames(db, symbols, start, end)
+    logger.info("Simulating %d symbols, %s to %s", len(frames), start.date(), end.date())
+    results = simulate(frames, spy_data, start, end, initial_capital, universe_history)
     log_report(results)
     return results
 
@@ -409,6 +498,7 @@ def log_report(results: dict):
         f"Protection ON:     {p.protection_days}/{p.total_days} days",
         f"FastExit / Normal sells: {p.fastexit_sells} / {p.normal_sells}",
         f"Missed buy signals (no slot/cash/bar): {p.missed_signals}",
+        f"Universe rebalances: {len(results['universe_history'])}",
         "=" * 80,
     ]
     for line in lines:
@@ -424,8 +514,8 @@ def main():
     parser.add_argument('--start', default='2005-01-01')
     parser.add_argument('--end', help='Default: latest SPY bar in the database')
     parser.add_argument('--capital', type=float, default=100000)
-    parser.add_argument('--all-symbols', action='store_true',
-                        help='Trade every symbol instead of the monthly top-N momentum universe')
+    parser.add_argument('--screen', help=f'Screen name (default config.SCREEN_NAME = {config.SCREEN_NAME!r})')
+    parser.add_argument('--no-screen', action='store_true', help='Trade every symbol in the database')
     parser.add_argument('--trades-csv', help='Write the trade list to this CSV file')
     args = parser.parse_args()
 
@@ -438,11 +528,10 @@ def main():
 
     results = run_backtest(
         db=db,
-        symbols=[s for s in db.list_symbols() if s != 'SPY'],
         start_date=args.start,
         end_date=end,
         initial_capital=args.capital,
-        universe_size=None if args.all_symbols else config.UNIVERSE_SIZE,
+        screen=None if args.no_screen else get_screen(args.screen),
     )
     if args.trades_csv:
         results['trades'].to_csv(args.trades_csv, index=False)

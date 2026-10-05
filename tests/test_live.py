@@ -50,20 +50,24 @@ def test_tracker_migration_reads_values_not_formulas():
 
 
 @pytest.fixture
-def pm_env(tmp_path, monkeypatch, make_frames):
+def pm_env(tmp_path, monkeypatch, make_frames, sqlite_db):
     import daily_portfolio_manager as dpm
-    import universe_selector
+    import screens
+    from tests.conftest import TopVolumeScreen
     frames, spy = make_frames(n_symbols=40, start='2018-01-01', end='2020-12-31')
     frames['SPY'] = spy
+    db = sqlite_db(frames)
+    db.frames = frames
+    screen = TopVolumeScreen(25)
+    monkeypatch.setitem(screens.SCREENS, screen.name, screen)
+    monkeypatch.setattr(config, 'SCREEN_NAME', screen.name)
     monkeypatch.setattr(dpm, 'STATE_FILE', tmp_path / 'state.json')
     monkeypatch.setattr(dpm, 'UNIVERSE_CACHE_FILE', tmp_path / 'universe.json')
     monkeypatch.setattr(dpm, 'TRACKER_FILE', tmp_path / 'missing.xlsx')
     monkeypatch.setattr(dpm, 'REPORT_FILE', tmp_path / 'orders.html')
-    monkeypatch.setattr(universe_selector.UniverseSelector, '_get_qualified_symbols',
-                        lambda self: [s for s in frames if s != 'SPY'])
     clock = {'now': pd.Timestamp('2020-12-31')}
     monkeypatch.setattr(dpm, 'datetime', type('D', (), {'now': staticmethod(lambda: clock['now'])}))
-    return dpm, FakeDB(frames), tmp_path, clock
+    return dpm, db, tmp_path, clock
 
 
 def test_portfolio_manager_daily_runs(pm_env):
@@ -82,7 +86,7 @@ def test_portfolio_manager_daily_runs(pm_env):
     before = (tmp / 'state.json').read_text()
     assert dpm.PortfolioManager(db).run() == 0
     assert (tmp / 'state.json').read_text() == before
-    assert json.loads((tmp / 'universe.json').read_text())['month'] == '2020-12'
+    assert json.loads((tmp / 'universe.json').read_text())['period'] == '2020Q4'
 
 
 def test_dry_run_saves_nothing(pm_env):
@@ -94,8 +98,8 @@ def test_dry_run_saves_nothing(pm_env):
 def test_live_decisions_match_backtest(pm_env, monkeypatch):
     """Day-by-day live runs make the same buy/sell decisions as the backtest"""
     from backtest import run_backtest_on_frames
+    from tests.conftest import TopVolumeScreen
     dpm, db, tmp, clock = pm_env
-    monkeypatch.setattr(config, 'UNIVERSE_SIZE', 25)
 
     days = pd.bdate_range('2020-09-01', '2020-12-31')
     live = {}
@@ -107,7 +111,8 @@ def test_live_decisions_match_backtest(pm_env, monkeypatch):
                      set(pm.new_positions) | set(pm.replaced_positions))
 
     frames = {s: f for s, f in db.frames.items() if s != 'SPY'}
-    res = run_backtest_on_frames(frames, db.frames['SPY'], days[0], days[-1], 100_000, universe_size=25)
+    res = run_backtest_on_frames(frames, db.frames['SPY'], days[0], days[-1], 100_000,
+                                 screen=TopVolumeScreen(25))
     trades = res['trades']
     signal_day = {d: days[i - 1] for i, d in enumerate(days) if i > 0}
     backtest = {d: (set(), set()) for d in days}

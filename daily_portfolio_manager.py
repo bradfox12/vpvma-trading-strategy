@@ -80,7 +80,7 @@ def load_state(initial_cash: float) -> dict:
         len(positions), initial_cash, realized, invested, cash, STATE_FILE.name
     )
     return {'cash': cash, 'positions': positions, 'last_run_data_date': None,
-            'initial_cash': initial_cash}
+            'initial_cash': initial_cash, 'swap_streaks': {}}
 
 
 def _read_tracker(path: Path):
@@ -134,11 +134,7 @@ class PortfolioManager:
 
         self.db = db
         self.state = load_state(initial_cash)
-        self.selector = UniverseSelector(
-            self.db,
-            exclude_symbols=['SPY'],
-            cache_file=UNIVERSE_CACHE_FILE,
-        )
+        self.selector = UniverseSelector(self.db, cache_file=UNIVERSE_CACHE_FILE)
         self.closed_trades = []
         self.new_positions = []
         self.replaced_positions = []
@@ -159,14 +155,13 @@ class PortfolioManager:
         """Signals for symbols whose latest bar is data_date; stale symbols are reported and skipped"""
         start = data_date - timedelta(days=config.INDICATOR_LOOKBACK_DAYS)
         end = data_date + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)  # whole day, never the next
+        bars = self.db.get_bars(start, end, symbols=sorted(symbols),
+                                columns=('open', 'high', 'low', 'close', 'volume'))
+        by_symbol = {sym: df.reset_index(drop=True) for sym, df in bars.groupby('symbol')}
         signals, stale = {}, []
         for symbol in sorted(symbols):
-            try:
-                df = self.db.get_ohlcv_data(symbol, start_date=start, end_date=end)
-            except Exception:
-                logger.exception("%s: failed to load data", symbol)
-                continue
-            if df.empty:
+            df = by_symbol.get(symbol)
+            if df is None or df.empty:
                 stale.append(symbol)
                 continue
             self.prices[symbol] = float(df['close'].iloc[-1])
@@ -258,15 +253,21 @@ class PortfolioManager:
             if sym not in signals:
                 logger.warning("  %s is held but has no current signal - holding unchanged", sym)
 
-        plan = plan_day(self.positions, signals, spy_bearish, universe)
+        plan = plan_day(self.positions, signals, spy_bearish, universe,
+                        swap_streaks=self.state.get('swap_streaks', {}))
+        self.state['swap_streaks'] = plan.swap_streaks
+        if plan.swap_streaks:
+            logger.info("Swap candidates (closes ranked in top %d, need %d): %s",
+                        config.MAX_POSITIONS, config.SWAP_CONFIRM_DAYS, plan.swap_streaks)
         logger.info("Plan: %d sells, %d replacements, %d buys, %d unfilled buy signals",
                     len(plan.sells), len(plan.replacements), len(plan.buys), plan.missed_signals)
 
         for order in plan.sells:
             self._close(order['symbol'], data_date, order['reason'], spy_bearish)
         for rep in plan.replacements:
-            logger.info("  [REPLACE] %s => %s (+%.0f%% strength)",
-                        rep['sell_symbol'], rep['buy_symbol'], rep['improvement'] * 100)
+            logger.info("  [SWAP] %s (rank %d) => %s (rank %d, top %d for %d closes)",
+                        rep['sell_symbol'], rep['sell_rank'], rep['buy_symbol'], rep['buy_rank'],
+                        config.MAX_POSITIONS, rep['confirm_days'])
             self._close(rep['sell_symbol'], data_date, 'Replacement', spy_bearish)
         equity = self.equity()
         for rep in plan.replacements:

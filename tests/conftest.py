@@ -52,3 +52,31 @@ def make_frames():
         spy = make_ohlcv(dates, 10_000, drift=0.0003, vol=0.012)
         return frames, spy
     return _make
+
+
+class TopVolumeScreen:
+    """Small deterministic screen for tests: top `size` by median dollar volume"""
+    fields = []
+
+    def __init__(self, size=25):
+        self.size = size
+        self.name = f'test_top{size}'
+
+    def select(self, data):
+        from screens import LiquidityScreen
+        liq = LiquidityScreen().eligible(data)
+        ranked = liq['median_dollar_volume'].sort_values(ascending=False).head(self.size)
+        return pd.DataFrame({'symbol': ranked.index, 'score': ranked.to_numpy()})
+
+
+@pytest.fixture
+def sqlite_db(tmp_path):
+    from data.database import Database
+    db = Database(url=f"sqlite:///{tmp_path / 'test.db'}")
+    db.create_tables()
+
+    def load(frames):
+        for sym, df in frames.items():
+            db.insert_ohlcv_data(sym, df, replace=True)
+        return db
+    return load

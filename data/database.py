@@ -8,6 +8,8 @@ Tables:
 - ohlcv_data: one fully adjusted daily bar per (symbol, session date at midnight)
 - corporate_actions: splits/dividends already applied to ohlcv_data, so an
   adjustment can never be applied twice
+- securities: security master (type, exchange, listing dates, sector)
+- fundamentals: point-in-time fundamentals keyed by the date they became public
 """
 
 import logging
@@ -53,7 +55,37 @@ corporate_actions_table = Table(
     UniqueConstraint('symbol', 'ex_date', 'kind'),
 )
 
+securities_table = Table(
+    'securities', metadata,
+    Column('symbol', String(20), primary_key=True),
+    Column('name', String(200)),
+    Column('type', String(20)),            # e.g. CS = common stock, ETF, PFD, ADRC
+    Column('exchange', String(20)),
+    Column('sector', String(100)),
+    Column('industry', String(200)),
+    Column('list_date', DateTime),
+    Column('delist_date', DateTime),       # NULL while still listed
+)
+
+# Point-in-time fundamentals, long format: one row per (symbol, field, period,
+# version). available_date is when that value became public (filing date);
+# a restatement is a new row with a later available_date, so every screening
+# date sees exactly the values public at the time.
+fundamentals_table = Table(
+    'fundamentals', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('symbol', String(20), nullable=False),
+    Column('field', String(60), nullable=False),
+    Column('period_end', DateTime, nullable=False),
+    Column('available_date', DateTime, nullable=False),
+    Column('value', Float),
+    UniqueConstraint('symbol', 'field', 'period_end', 'available_date'),
+    Index('idx_fund_symbol_available', 'symbol', 'available_date'),
+)
+
 OHLCV_COLUMNS = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+SECURITY_COLUMNS = ['symbol', 'name', 'type', 'exchange', 'sector', 'industry', 'list_date', 'delist_date']
+FUNDAMENTAL_COLUMNS = ['symbol', 'field', 'period_end', 'available_date', 'value']
 
 
 class Database:
@@ -217,6 +249,90 @@ class Database:
             self.engine, parse_dates=['last'],
         )['last'].iloc[0]
         return None if pd.isna(value) else pd.Timestamp(value)
+
+    def get_bars(self, start_date, end_date, symbols: Optional[List[str]] = None,
+                 columns=('close', 'volume')) -> pd.DataFrame:
+        """
+        Bars for many symbols in one query: [symbol, timestamp, *columns]
+
+        Args:
+            start_date / end_date: Inclusive bounds
+            symbols: Restrict to these symbols (default: all)
+            columns: OHLCV columns to return
+        """
+        t = ohlcv_table.c
+        query = select(t.symbol, t.timestamp, *[t[c] for c in columns]).where(
+            t.timestamp >= pd.Timestamp(start_date).to_pydatetime(),
+            t.timestamp <= pd.Timestamp(end_date).to_pydatetime(),
+        )
+        if symbols is not None:
+            query = query.where(t.symbol.in_(list(symbols)))
+        df = pd.read_sql(query.order_by(t.symbol, t.timestamp), self.engine, parse_dates=['timestamp'])
+        for col in columns:
+            df[col] = df[col].astype(float)
+        return df
+
+    def upsert_securities(self, securities: pd.DataFrame) -> int:
+        """Replace the rows for the given symbols in the securities master"""
+        if securities.empty:
+            return 0
+        df = securities.reindex(columns=SECURITY_COLUMNS)
+        for col in ('list_date', 'delist_date'):
+            df[col] = pd.to_datetime(df[col])
+        df = df.astype(object).where(df.notna(), None)
+        with self.engine.begin() as conn:
+            conn.execute(securities_table.delete().where(securities_table.c.symbol.in_(df['symbol'].tolist())))
+            conn.execute(securities_table.insert(), df.to_dict('records'))
+        return len(df)
+
+    def get_securities(self) -> pd.DataFrame:
+        """The securities master (empty if not loaded yet)"""
+        return pd.read_sql(select(securities_table), self.engine, parse_dates=['list_date', 'delist_date'])
+
+    def insert_fundamentals(self, rows: pd.DataFrame) -> int:
+        """
+        Insert point-in-time fundamentals [symbol, field, period_end, available_date, value].
+        Rows already stored (same symbol, field, period_end, available_date) are
+        skipped; restatements (later available_date) are added as new versions.
+        """
+        if rows.empty:
+            return 0
+        df = rows[FUNDAMENTAL_COLUMNS].copy()
+        df['period_end'] = pd.to_datetime(df['period_end'])
+        df['available_date'] = pd.to_datetime(df['available_date'])
+        if df['available_date'].isna().any():
+            raise ValueError("fundamentals rows need an available_date (filing date)")
+        key = ['symbol', 'field', 'period_end', 'available_date']
+        df = df.drop_duplicates(key, keep='last')
+        f = fundamentals_table.c
+        with self.engine.begin() as conn:
+            existing = pd.read_sql(
+                select(f.symbol, f.field, f.period_end, f.available_date).where(
+                    f.symbol.in_(df['symbol'].unique().tolist())),
+                conn, parse_dates=['period_end', 'available_date'])
+            if not existing.empty:
+                have = set(map(tuple, existing[key].to_numpy()))
+                df = df[[tuple(r) not in have for r in df[key].to_numpy()]]
+            if df.empty:
+                return 0
+            conn.execute(fundamentals_table.insert(), df.astype(object).where(df.notna(), None).to_dict('records'))
+        return len(df)
+
+    def get_fundamentals(self, available_by, since=None, symbols: Optional[List[str]] = None) -> pd.DataFrame:
+        """
+        Fundamentals rows public on or before `available_by` (optionally after `since`)
+
+        Returns:
+            DataFrame [symbol, field, period_end, available_date, value]
+        """
+        f = fundamentals_table.c
+        query = select(*[f[c] for c in FUNDAMENTAL_COLUMNS]).where(
+            f.available_date <= pd.Timestamp(available_by).to_pydatetime())
+        if since is not None:
+            query = query.where(f.available_date > pd.Timestamp(since).to_pydatetime())
+        if symbols is not None:
+            query = query.where(f.symbol.in_(list(symbols)))
+        return pd.read_sql(query, self.engine, parse_dates=['period_end', 'available_date'])
 
     def last_closes_before(self, symbols: List[str], date) -> Dict[str, float]:
         """Most recent close strictly before `date` for each symbol"""

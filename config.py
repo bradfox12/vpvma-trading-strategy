@@ -72,18 +72,33 @@ REGIME_LOOKBACK_DAYS = 370
 # PORTFOLIO RULES (shared by backtest and live trading)
 # ============================================================================
 
-MAX_POSITIONS = 20
+MAX_POSITIONS = 20             # Hold at most this many signals
 POSITION_SIZE_PCT = 0.05       # Fraction of equity per new position
 COMMISSION = 1.0               # $ per fill
 SLIPPAGE_BPS = 2               # Basis points per fill
 
-# Swap a losing position for a buy signal >=25% stronger when the book is full
-ENABLE_REPLACEMENT = True
+# Rank buffer for swaps. Each close, holdings and waiting buy candidates are
+# ranked together by strength = (VPVMA - buy threshold) / |VPVMAS|.
+# - A candidate qualifies while it ranks within MAX_POSITIONS (top 20) and is
+#   still above its own buy threshold
+# - It must qualify on SWAP_CONFIRM_DAYS consecutive closes (1 = no confirmation)
+# - It then replaces the weakest holding ranked worse than SWAP_EXIT_RANK
+#   (i.e. at least SWAP_EXIT_RANK signals are stronger than that holding)
+SWAP_EXIT_RANK = 25
+SWAP_CONFIRM_DAYS = 2
+MAX_SWAPS_PER_DAY = None       # None = no cap
 
-# Momentum universe: top UNIVERSE_SIZE symbols by MOMENTUM_PERIOD-bar return,
-# re-selected on the first trading day of each month
-UNIVERSE_SIZE = 100
-MOMENTUM_PERIOD = 20
+# ============================================================================
+# UNIVERSE SCREEN (see screens.py)
+# ============================================================================
+
+SCREEN_NAME = 'liquidity'       # a key of screens.SCREENS - replace with your own screen
+SCREEN_FREQUENCY = 'quarterly'  # 'monthly' or 'quarterly'; runs on the first session of the period
+SCREEN_SIZE = 500               # Maximum tradable symbols (screens usually return fewer, ~250)
+SCREEN_LOOKBACK_DAYS = 400      # Calendar days of prices available to the screen
+SCREEN_MIN_PRICE = 5.0          # Exclude stocks below this close
+SCREEN_MIN_DOLLAR_VOLUME = 5_000_000   # Minimum median daily $ volume (last 60 sessions)
+SCREEN_SECURITY_TYPES = ['CS']  # Common stock only (needs the securities table)
 
 # ============================================================================
 # PARAMETER NOTES

@@ -21,7 +21,7 @@ import seaborn as sns
 from datetime import datetime
 from data.database import Database
 from backtest import run_backtest
-import config
+from screens import get_screen
 
 # Set style
 plt.style.use('seaborn-v0_8-darkgrid')
@@ -522,7 +522,6 @@ def generate_all_charts():
     db = Database()
     
     # Load universe
-    symbols = [s for s in db.list_symbols() if s != 'SPY']
     end_date = db.latest_timestamp('SPY')
     
     # Run 20-year backtest
@@ -531,11 +530,10 @@ def generate_all_charts():
     
     results = run_backtest(
         db=db,
-        symbols=symbols,
         start_date='2005-01-01',
         end_date=end_date,
         initial_capital=100000,
-        universe_size=config.UNIVERSE_SIZE,
+        screen=get_screen(),
     )
     
     print()

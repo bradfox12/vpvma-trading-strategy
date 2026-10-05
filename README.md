@@ -30,7 +30,7 @@ The Volume-Price-Volume Moving Average (VPVMA) indicator incorporates volume and
 **Key modifications from original paper:**
 1. Independent buy/sell bandwidth controls (paper's coupled bandwidth caused asymmetric exits)
 2. Adaptive protection mechanism for bear market regime
-3. Dynamic universe selection (top momentum stocks, monthly rebalancing)
+3. Screened universe: a volume + fundamentals screen picks up to 500 (typically ~250) US common stocks each quarter (or month); the strategy trades the 15-20 strongest signals within it
 
 ## Methodology
 
@@ -168,7 +168,8 @@ python daily_portfolio_manager.py --dry-run # preview orders without saving anyt
 ├── daily_update.py         # Daily data update
 ├── daily_portfolio_manager.py # Live order generation + ledger
 ├── run_daily_workflow.py   # Update + orders, for a scheduler
-├── universe_selector.py    # Monthly momentum universe
+├── screens.py              # Universe screens (your criteria go here)
+├── universe_selector.py    # Live wrapper: runs the screen once per period
 ├── config.py               # Strategy parameters
 ├── research/               # Universe-metric walk-forward research
 ├── tests/                  # pytest suite
@@ -186,13 +187,32 @@ SELL_BANDWIDTH = 0.08     # Exit threshold (normal)
 BEAR_SELL_BANDWIDTH = 0.032  # Exit threshold (bear market)
 
 SPY_MA_PERIOD = 200       # Regime detection window
+
+MAX_POSITIONS = 20        # Hold the strongest signals, up to this many
+SWAP_EXIT_RANK = 25       # Rank buffer: a holding is only swapped out once it ranks worse than this
+SWAP_CONFIRM_DAYS = 2     # A new signal must rank in the top MAX_POSITIONS on this many consecutive closes
+MAX_SWAPS_PER_DAY = None  # Optional cap (None = no cap)
+
+SCREEN_NAME = 'liquidity' # Active screen in screens.SCREENS
+SCREEN_FREQUENCY = 'quarterly'
+SCREEN_SIZE = 500
 ```
+
+### Universe screens
+A screen runs on the first session of each period using only information public
+on that date: prices/volume for the last 400 days, the `securities` table
+(type, exchange, sector) and the `fundamentals` table, where every value carries
+the date it was filed. Restatements are stored as new versions, so a backtest
+never sees a number before it was published. To add criteria, subclass
+`Screen` in `screens.py` (see `ExampleFundamentalScreen`), register it in
+`SCREENS` and set `SCREEN_NAME`. The backtest and live trading use the same
+screen and the same `ScreenData` inputs (a parity test checks this).
 
 ## Statistical Validation
 
 **Sample size:** 8,033 trades over 20.8 years
 **Universe:** 183 large-cap US equities
-**Rebalancing:** Monthly (top momentum stocks)
+**Rebalancing:** Universe re-screened quarterly or monthly (see Universe screens)
 **Position sizing:** Equal weight, 5% per position, maximum 20 positions
 
 **Sharpe ratio confidence:**

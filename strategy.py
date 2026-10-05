@@ -6,9 +6,10 @@ database, file or clock access, so the backtest and live trading cannot drift
 apart:
 
 - symbol_signal(): latest VPVMA values + buy flag + strength for one symbol
-- rank_by_momentum(): monthly momentum universe selection
-- plan_day(): sells (signal / universe drop), loser replacements and new buys
+- plan_day(): sells (signal / universe drop), buffered swaps and new buys
 - shares_for(): position sizing
+
+Which symbols are tradable is decided by screens.py.
 
 HOW and WHEN orders are filled (next open in the backtest, broker orders live)
 stays in the callers.
@@ -23,11 +24,6 @@ import pandas as pd
 import config
 from main import calculate_vpvma_indicator
 from signals.signal_generator import get_sell_bandwidth, is_sell, signal_strength
-
-# A held loser is swapped for a buy candidate whose strength is at least this
-# much better: (candidate - current) / |current| >= REPLACEMENT_MIN_IMPROVEMENT
-REPLACEMENT_MIN_IMPROVEMENT = 0.25
-
 
 @dataclass
 class SymbolSignal:
@@ -46,9 +42,10 @@ class SymbolSignal:
 class DayPlan:
     """Orders decided at one close, to be executed at the next open"""
     sells: List[dict] = field(default_factory=list)          # {'symbol', 'reason', 'fast_exit'}
-    replacements: List[dict] = field(default_factory=list)   # {'sell_symbol', 'buy_symbol', 'improvement'}
+    replacements: List[dict] = field(default_factory=list)   # {'sell_symbol', 'buy_symbol', 'sell_rank', 'buy_rank', 'confirm_days'}
     buys: List[str] = field(default_factory=list)
     missed_signals: int = 0
+    swap_streaks: Dict[str, int] = field(default_factory=dict)  # candidate -> consecutive closes ranked within MAX_POSITIONS
 
 
 def compute_indicator_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -101,69 +98,37 @@ def symbol_signal(symbol: str, df: pd.DataFrame) -> Optional[SymbolSignal]:
     return signal_from_row(symbol, frame.iloc[-1])
 
 
-def rank_by_momentum(
-    closes: Dict[str, pd.Series],
-    asof: pd.Timestamp,
-    period: int,
-    size: int,
-) -> pd.DataFrame:
-    """
-    Top `size` symbols by `period`-bar price momentum using data up to `asof`.
-
-    Args:
-        closes: symbol -> close prices indexed by timestamp
-        asof: Last bar that may be used (no look-ahead)
-        period: Momentum lookback in bars
-        size: Number of symbols to return
-
-    Returns:
-        DataFrame [symbol, momentum_score, current_price, past_price] sorted descending
-    """
-    rows = []
-    for symbol, series in closes.items():
-        recent = series.loc[:asof].dropna().tail(period + 1)
-        if len(recent) < period + 1:
-            continue
-        past, current = float(recent.iloc[0]), float(recent.iloc[-1])
-        if past <= 0:
-            continue
-        rows.append({
-            'symbol': symbol,
-            'momentum_score': current / past - 1,
-            'current_price': current,
-            'past_price': past,
-        })
-    ranked = pd.DataFrame(rows, columns=['symbol', 'momentum_score', 'current_price', 'past_price'])
-    if ranked.empty:
-        return ranked
-    return ranked.sort_values('momentum_score', ascending=False).head(size).reset_index(drop=True)
-
-
 def plan_day(
     held: Dict[str, dict],
     signals: Dict[str, SymbolSignal],
     spy_bearish: bool,
     universe: Optional[Iterable[str]] = None,
+    swap_streaks: Optional[Dict[str, int]] = None,
     max_positions: int = None,
-    enable_replacement: bool = None,
 ) -> DayPlan:
     """
     Decide the day's orders from the close's signals.
 
+    1. Exits: sell signal (FastExit bandwidth in bear regime) or no longer in the universe
+    2. Buy candidates: today's buy signals in the universe, strongest first
+    3. Free slots are filled with the strongest candidates
+    4. Rank buffer: holdings and waiting candidates (buy signals that did not
+       get a slot) are ranked together by strength each close. A candidate that
+       ranks within MAX_POSITIONS (and stays above its own buy threshold) on
+       SWAP_CONFIRM_DAYS consecutive closes replaces the weakest holding ranked
+       worse than SWAP_EXIT_RANK. MAX_SWAPS_PER_DAY caps swaps (None = no cap).
+
     Args:
-        held: symbol -> position dict with at least 'entry_price'
-        signals: symbol -> SymbolSignal for every symbol with valid data today
-        spy_bearish: Regime at today's close (FastExit when True)
-        universe: Tradable symbols; None = every symbol in `signals`.
-                  Held symbols outside the universe are sold ('Universe Drop').
+        held: symbol -> position dict
+        signals: symbol -> SymbolSignal for symbols with a bar today (at least
+                 every held symbol, today's buy signals and every symbol in swap_streaks)
+        spy_bearish: Regime at today's close
+        universe: Tradable symbols; None = every symbol in `signals`
+        swap_streaks: plan.swap_streaks from the previous session (carry it forward)
         max_positions: Position cap (default config.MAX_POSITIONS)
-        enable_replacement: Swap losers for much stronger signals
-                            (default config.ENABLE_REPLACEMENT)
     """
     if max_positions is None:
         max_positions = config.MAX_POSITIONS
-    if enable_replacement is None:
-        enable_replacement = config.ENABLE_REPLACEMENT
 
     plan = DayPlan()
     universe_set = set(universe) if universe is not None else None
@@ -188,35 +153,50 @@ def plan_day(
          and (universe_set is None or sym in universe_set)),
         key=lambda s: (-s.strength, s.symbol),
     )
-    used = set()
 
-    # 3. Replace losers when the book is still full after exits
-    if enable_replacement and len(remaining) >= max_positions:
-        for symbol in sorted(remaining):
-            sig = signals.get(symbol)
-            if sig is None or sig.price >= held[symbol]['entry_price']:
-                continue
-            for cand in candidates:
-                if cand.symbol in used:
-                    continue
-                if sig.strength != 0:
-                    improvement = (cand.strength - sig.strength) / abs(sig.strength)
-                else:
-                    improvement = float('inf')
-                if improvement >= REPLACEMENT_MIN_IMPROVEMENT:
-                    plan.replacements.append({
-                        'sell_symbol': symbol,
-                        'buy_symbol': cand.symbol,
-                        'improvement': improvement,
-                    })
-                    used.add(cand.symbol)
-                    break
-
-    # 4. Fill free slots with the strongest unused candidates
+    # 3. Fill free slots
     free_slots = max(0, max_positions - len(remaining))
-    unused = [c for c in candidates if c.symbol not in used]
-    plan.buys = [c.symbol for c in unused[:free_slots]]
-    plan.missed_signals = max(0, len(unused) - free_slots)
+    plan.buys = [c.symbol for c in candidates[:free_slots]]
+    leftover = candidates[free_slots:]
+
+    # 4. Rank buffer: rank every current signal (holdings + waiting candidates)
+    #    by strength. A candidate must rank within MAX_POSITIONS on
+    #    SWAP_CONFIRM_DAYS consecutive closes; it then replaces the weakest
+    #    holding ranked worse than SWAP_EXIT_RANK.
+    prior = swap_streaks or {}
+    pool = {c.symbol: c for c in leftover}                             # today's unfilled buy signals
+    for sym in prior:                                                  # candidates already counting
+        sig = signals.get(sym)
+        if sig is not None and sym not in held and sym not in plan.buys \
+                and (universe_set is None or sym in universe_set):
+            pool.setdefault(sym, sig)
+
+    holdings = {sym: signals[sym] for sym in remaining if sym in signals}
+    ranked = sorted(list(holdings.values()) + list(pool.values()), key=lambda s: (-s.strength, s.symbol))
+    rank = {sig.symbol: i for i, sig in enumerate(ranked, 1)}
+
+    streaks = {}
+    if len(remaining) + len(plan.buys) >= max_positions:
+        for sym, sig in pool.items():
+            # still a valid signal (above its buy threshold) and ranked inside the book
+            if sig.strength > 0 and rank[sym] <= max_positions:
+                streaks[sym] = prior.get(sym, 0) + 1
+
+    swappable = sorted((sig for sym, sig in holdings.items() if rank[sym] > config.SWAP_EXIT_RANK),
+                       key=lambda s: (s.strength, s.symbol))           # weakest first
+    confirmed = sorted((pool[sym] for sym, n in streaks.items() if n >= config.SWAP_CONFIRM_DAYS),
+                       key=lambda s: (-s.strength, s.symbol))
+    for weak, cand in zip(swappable, confirmed):
+        if config.MAX_SWAPS_PER_DAY and len(plan.replacements) >= config.MAX_SWAPS_PER_DAY:
+            break
+        plan.replacements.append({'sell_symbol': weak.symbol, 'buy_symbol': cand.symbol,
+                                  'sell_rank': rank[weak.symbol], 'buy_rank': rank[cand.symbol],
+                                  'confirm_days': streaks[cand.symbol]})
+        del streaks[cand.symbol]
+
+    plan.swap_streaks = streaks
+    plan.missed_signals = sum(1 for c in leftover if c.symbol not in streaks
+                              and c.symbol not in {r['buy_symbol'] for r in plan.replacements})
     return plan
 
 

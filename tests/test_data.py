@@ -157,6 +157,8 @@ def test_backtest_runs_from_database(db):
     db.insert_ohlcv_data('SPY', make_ohlcv(dates, 99, drift=0.0003, vol=0.012), replace=True)
     for i in range(30):
         db.insert_ohlcv_data(f'S{i:02d}', make_ohlcv(dates, i), replace=True)
-    res = run_backtest(db, db.list_symbols(), '2019-06-01', '2020-12-31', 100_000, universe_size=20)
+    from tests.conftest import TopVolumeScreen
+    res = run_backtest(db, '2019-06-01', '2020-12-31', 100_000, screen=TopVolumeScreen(20))
+    assert len(res['universe_history']) == 7
     assert res['metrics']['num_round_trips'] > 0
     assert res['history']['num_positions'].max() <= config.MAX_POSITIONS
